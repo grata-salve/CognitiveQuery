@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: CognitiveQuery
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/cognitivequerydb
+    username: grata
+    password: postgres
+    driver-class-name: org.postgresql.Driver
+
+  security:
+    oauth2:
+      client:
+        registration:
+          github:
+            client-id: Iv23liUi3knWdKrsTWJ1
+            client-secret: 6f7fba06809aca1b64db8db42dd687d1ad5d2314
+            scope: read:user, user:email
+            redirect-uri: http://localhost:8080/login/oauth2/code/github
+
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+    properties:
+      hibernate:
+        format_sql: true
+
+  github:
+    token:
+      url: https://github.com/login/oauth/access_token
+    user:
+      info:
+        url: https://api.github.com/user
+
+  app:
+    oauth:
+      state:
+        ttl:
+          minutes: 10
