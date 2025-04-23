@@ -5,7 +5,6 @@ import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
 import lombok.ToString;
-
 import java.time.LocalDateTime;
 
 @Entity
@@ -26,35 +25,37 @@ public class AppUser {
     @Column(nullable = false)
     private String telegramId;
 
-    // Can be null if the user hasn't linked the account yet
-    @Column(unique = true)
+    @Column(unique = true, nullable = true)
     private String githubId;
 
-    // Can be null
-    @Column
+    @Column(nullable = true)
     private String githubLogin;
 
-    // Display name from GitHub (can be null)
     private String name;
 
-    // Email from GitHub (can be null or require scope)
-    private String email;
+    private String email; // Email from GitHub (might be null)
 
-    // Avatar URL from GitHub
     private String avatarUrl;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    private AuthProvider provider = AuthProvider.TELEGRAM; // Main provider - telegram
+    private AuthProvider provider = AuthProvider.TELEGRAM;
 
-    private LocalDateTime lastLogin; // Time of the last login via OAuth provider
+    private LocalDateTime lastLogin;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
-    // Constructor for a new user from Telegram
+    // --- NEW FIELDS ---
+    @Column(length = 1024) // Increased length for URL
+    private String lastAnalyzedRepoUrl;
+
+    @Column(length = 2048) // Path can be long
+    private String processedEntitiesPath; // Path to the folder with copied .java files
+    // --- END OF NEW FIELDS ---
+
     public AppUser(String telegramId) {
         this.telegramId = telegramId;
-        this.provider = AuthProvider.TELEGRAM; // Default
+        this.provider = AuthProvider.TELEGRAM;
     }
 
     @PrePersist
@@ -76,10 +77,21 @@ public class AppUser {
     public void updateFromGitHub(String githubId, String login, String name, String email, String avatarUrl) {
         this.githubId = githubId;
         this.githubLogin = login;
-        this.name = (name != null) ? name : this.name; // Do not overwrite with null if the name already existed
-        this.email = (email != null) ? email : this.email;
+        this.name = (name != null) ? name : this.name;
+        this.email = email; // Use email obtained from basic user info
         this.avatarUrl = avatarUrl;
-        this.provider = AuthProvider.GITHUB; // Indicate that the GitHub link is established
+        // Update provider only if it was TELEGRAM before, avoid overwriting GITHUB with itself
+        if (this.provider == AuthProvider.TELEGRAM) {
+            this.provider = AuthProvider.GITHUB;
+        }
         this.lastLogin = LocalDateTime.now();
     }
+
+    // --- NEW METHOD ---
+    public void setAnalysisResults(String repoUrl, String entitiesPath) {
+        this.lastAnalyzedRepoUrl = repoUrl;
+        this.processedEntitiesPath = entitiesPath;
+        // Optionally add/update a 'lastAnalyzedAt' timestamp here
+    }
+    // --- END OF NEW METHOD ---
 }

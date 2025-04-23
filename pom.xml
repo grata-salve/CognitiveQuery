@@ -19,6 +19,7 @@
         <jgit.version>6.9.0.202403050737-r</jgit.version>
         <reflections.version>0.10.2</reflections.version>
         <javaparser.version>3.25.10</javaparser.version>
+        <telegrambots.version>6.9.7.1</telegrambots.version>
     </properties>
 
     <dependencies>
@@ -73,6 +74,13 @@
             <groupId>com.github.javaparser</groupId>
             <artifactId>javaparser-core</artifactId>
             <version>${javaparser.version}</version>
+        </dependency>
+
+        <!-- Telegram -->
+        <dependency>
+            <groupId>org.telegram</groupId>
+            <artifactId>telegrambots-spring-boot-starter</artifactId>
+            <version>${telegrambots.version}</version>
         </dependency>
 
         <!-- Testing -->
