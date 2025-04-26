@@ -70,8 +70,4 @@ public class ProjectAnalyzerService {
         }
     }
 
-    // Overload defaulting cleanup to true
-    public Path analyzeAndProcessProject(String gitUrl) {
-        return analyzeAndProcessProject(gitUrl, true);
-    }
 }

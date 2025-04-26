@@ -45,13 +45,11 @@ public class AppUser {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
-    // --- NEW FIELDS ---
     @Column(length = 1024) // Increased length for URL
     private String lastAnalyzedRepoUrl;
 
     @Column(length = 2048) // Path can be long
     private String processedEntitiesPath; // Path to the folder with copied .java files
-    // --- END OF NEW FIELDS ---
 
     public AppUser(String telegramId) {
         this.telegramId = telegramId;
@@ -87,11 +85,9 @@ public class AppUser {
         this.lastLogin = LocalDateTime.now();
     }
 
-    // --- NEW METHOD ---
     public void setAnalysisResults(String repoUrl, String entitiesPath) {
         this.lastAnalyzedRepoUrl = repoUrl;
         this.processedEntitiesPath = entitiesPath;
         // Optionally add/update a 'lastAnalyzedAt' timestamp here
     }
-    // --- END OF NEW METHOD ---
 }

@@ -44,7 +44,7 @@ public class GithubAuthController {
                 .queryParam("scope", String.join(" ", clientRegistration.getScopes()))
                 .queryParam("response_type", "code")
                 .queryParam("state", state)
-                .build().toUriString();
+                .build().encode().toUriString();
         log.info("Generated authorization URL for Telegram ID {}: {}", telegramId, authorizationUri);
         return ResponseEntity.ok(Map.of("authorizationUrl", authorizationUri));
     }

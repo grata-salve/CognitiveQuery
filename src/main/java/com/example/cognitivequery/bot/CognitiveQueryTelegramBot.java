@@ -23,7 +23,6 @@ import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -33,7 +32,6 @@ import java.util.regex.Pattern;
 public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
 
     private final String botUsername;
-    private final String backendApiBaseUrl;
     private final UserRepository userRepository;
     private final ProjectAnalyzerService projectAnalyzerService;
     private final WebClient webClient;
@@ -54,7 +52,6 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     ) {
         super(botToken);
         this.botUsername = botUsername;
-        this.backendApiBaseUrl = backendApiBaseUrl;
         this.userRepository = userRepository;
         this.projectAnalyzerService = projectAnalyzerService;
         this.webClient = webClientBuilder.baseUrl(backendApiBaseUrl).build();
@@ -90,7 +87,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
 
             String telegramIdStr = String.valueOf(userId);
             // Wrap DB operation in try-catch as it might fail
-            AppUser appUser = null;
+            AppUser appUser;
             try {
                 appUser = userRepository.findByTelegramId(telegramIdStr)
                         .orElseGet(() -> {
