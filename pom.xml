@@ -75,6 +75,10 @@
             <artifactId>javaparser-core</artifactId>
             <version>${javaparser.version}</version>
         </dependency>
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
 
         <!-- Telegram -->
         <dependency>

@@ -45,11 +45,11 @@ public class AppUser {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
-    @Column(length = 1024) // Increased length for URL
+    @Column(length = 1024)
     private String lastAnalyzedRepoUrl;
 
-    @Column(length = 2048) // Path can be long
-    private String processedEntitiesPath; // Path to the folder with copied .java files
+    @Column(length = 2048)
+    private String processedSchemaPath; // Renamed: Path to the generated schema JSON file
 
     public AppUser(String telegramId) {
         this.telegramId = telegramId;
@@ -76,18 +76,17 @@ public class AppUser {
         this.githubId = githubId;
         this.githubLogin = login;
         this.name = (name != null) ? name : this.name;
-        this.email = email; // Use email obtained from basic user info
+        this.email = email;
         this.avatarUrl = avatarUrl;
-        // Update provider only if it was TELEGRAM before, avoid overwriting GITHUB with itself
         if (this.provider == AuthProvider.TELEGRAM) {
             this.provider = AuthProvider.GITHUB;
         }
         this.lastLogin = LocalDateTime.now();
     }
 
-    public void setAnalysisResults(String repoUrl, String entitiesPath) {
+    // Updated method name to reflect it saves the schema path
+    public void setAnalysisResults(String repoUrl, String schemaPath) {
         this.lastAnalyzedRepoUrl = repoUrl;
-        this.processedEntitiesPath = entitiesPath;
-        // Optionally add/update a 'lastAnalyzedAt' timestamp here
+        this.processedSchemaPath = schemaPath;
     }
 }
