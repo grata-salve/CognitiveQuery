@@ -1,5 +1,6 @@
 package com.example.cognitivequery.service.projectextractor;
 
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
@@ -7,76 +8,101 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
+import java.util.Comparator;
 import java.util.List;
+import java.util.UUID;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 @Service
+@Slf4j
 public class EntityFileProcessor {
 
     /**
      * Processes a project directory to:
-     * 1. Identify database entity model files
-     * 2. Create an "Entities" directory in the target location
-     * 3. Move all entity files to that directory
-     * 4. Delete all other files from the project
+     * 1. Identify database entity model files.
+     * 2. Create a unique "processed_entities_{uuid}" directory in a specified base target location.
+     * 3. Copy all found entity files to that directory.
      *
-     * @param projectPath Path to the project directory
-     * @param targetPath  Path where the Entities directory should be created (can be same as projectPath)
-     * @return Number of preserved entity files
+     * @param projectPath     Path to the *cloned* project directory.
+     * @param baseTargetPath  Base path where the processed entities directory should be created.
+     * @param entityFileNames List of entity file names (e.g., "User.java").
+     * @return Path to the newly created directory containing copied entity files.
+     * @throws IOException If an I/O error occurs.
      */
-    public int processProjectFiles(String projectPath, String targetPath, List<String> entityFileNames) throws IOException {
+    public Path processAndCopyEntities(Path projectPath, Path baseTargetPath, List<String> entityFileNames) throws IOException {
+        String uniqueDirName = "processed_entities_" + UUID.randomUUID();
+        Path uniqueEntitiesDir = baseTargetPath.resolve(uniqueDirName);
+        Files.createDirectories(uniqueEntitiesDir);
+        log.info("Created unique directory for processed entities: {}", uniqueEntitiesDir);
 
-        // Create Entities directory
-        Path entitiesDir = Paths.get(targetPath, "entities");
-        if (!Files.exists(entitiesDir)) {
-            Files.createDirectories(entitiesDir);
+        if (entityFileNames == null || entityFileNames.isEmpty()) {
+            log.warn("No entity file names provided for project path: {}. Returning empty directory.", projectPath);
+            return uniqueEntitiesDir;
         }
 
-        // Find all entity files in the project
-        List<Path> entityFilePaths = findEntityFiles(projectPath, entityFileNames);
+        List<Path> entityFilePaths = findEntityFiles(projectPath.toString(), entityFileNames);
+        log.info("Found {} entity files to copy from {}", entityFilePaths.size(), projectPath);
 
-        // Move entity files to the Entities directory
+        int copiedCount = 0;
         for (Path entityFilePath : entityFilePaths) {
-            Path targetFile = entitiesDir.resolve(entityFilePath.getFileName());
-            Files.copy(entityFilePath, targetFile, StandardCopyOption.REPLACE_EXISTING);
+            try {
+                Path targetFile = uniqueEntitiesDir.resolve(entityFilePath.getFileName());
+                // Ensure source file exists before attempting copy
+                if (Files.exists(entityFilePath)) {
+                    Files.copy(entityFilePath, targetFile, StandardCopyOption.REPLACE_EXISTING);
+                    copiedCount++;
+                } else {
+                    log.warn("Source entity file not found, skipping copy: {}", entityFilePath);
+                }
+            } catch (IOException e) {
+                log.error("Failed to copy entity file {} to {}", entityFilePath, uniqueEntitiesDir, e);
+            }
         }
+        log.info("Successfully copied {} entity files to {}", copiedCount, uniqueEntitiesDir);
 
-        // Delete all files from the project (keeping the Entities directory)
-        deleteAllFilesExceptEntities(projectPath, entitiesDir);
-
-        return entityFileNames.size();
+        return uniqueEntitiesDir;
     }
 
-    /**
-     * Finds the full paths of all entity files in the project
-     */
     private List<Path> findEntityFiles(String projectPath, List<String> entityFileNames) throws IOException {
-        try (Stream<Path> walk = Files.walk(Paths.get(projectPath))) {
+        Path startPath = Paths.get(projectPath);
+        if (!Files.exists(startPath)) {
+            log.warn("Project path does not exist for finding entity files: {}", projectPath);
+            return List.of(); // Return empty list if path doesn't exist
+        }
+        try (Stream<Path> walk = Files.walk(startPath)) {
             return walk
                     .filter(Files::isRegularFile)
-                    .filter(path -> entityFileNames.contains(path.getFileName().toString()))
+                    .filter(path -> path.getFileName() != null && entityFileNames.contains(path.getFileName().toString()))
                     .collect(Collectors.toList());
         }
     }
 
     /**
-     * Deletes all files and directories from the project except for the Entities directory
+     * Helper method to delete a directory and its contents recursively.
+     * Use with caution!
+     *
+     * @param directory Path to the directory to delete.
+     * @throws IOException If an I/O error occurs during deletion.
      */
-    private void deleteAllFilesExceptEntities(String projectPath, Path entitiesDir) throws IOException {
-        Path projectDirPath = Paths.get(projectPath);
-
-        // If project path and target path are the same, we need to be careful not to delete the Entities directory
-        try (Stream<Path> walk = Files.walk(projectDirPath)) {
-            List<Path> pathsToDelete = walk
-                    .filter(path -> !path.equals(projectDirPath)) // Don't delete the root project dir
-                    .filter(path -> !path.startsWith(entitiesDir)) // Don't delete the Entities dir or its contents
-                    .sorted((p1, p2) -> -p1.compareTo(p2)) // Sort in reverse order to delete files before directories
-                    .toList();
-
-            for (Path path : pathsToDelete) {
-                Files.deleteIfExists(path);
-            }
+    public static void deleteDirectoryRecursively(Path directory) throws IOException {
+        if (!Files.exists(directory)) {
+            log.debug("Directory to delete does not exist: {}", directory);
+            return;
         }
+        log.warn("Recursively deleting directory: {}", directory);
+        try (Stream<Path> walk = Files.walk(directory)) {
+            walk.sorted(Comparator.reverseOrder())
+                    .forEach(path -> {
+                        try {
+                            Files.delete(path);
+                            log.debug("Deleted path: {}", path);
+                        } catch (IOException e) {
+                            // Log aggressively, as failure here means incomplete cleanup
+                            log.error("!!! Failed to delete path during recursive cleanup: {}", path, e);
+                        }
+                    });
+        }
+        log.info("Successfully initiated recursive deletion for directory: {}", directory);
     }
 }

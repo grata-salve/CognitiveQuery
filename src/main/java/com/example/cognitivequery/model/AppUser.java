@@ -26,35 +26,35 @@ public class AppUser {
     @Column(nullable = false)
     private String telegramId;
 
-    // Can be null if the user hasn't linked the account yet
-    @Column(unique = true)
+    @Column(unique = true, nullable = true)
     private String githubId;
 
-    // Can be null
-    @Column
+    @Column(nullable = true)
     private String githubLogin;
 
-    // Display name from GitHub (can be null)
     private String name;
 
-    // Email from GitHub (can be null or require scope)
-    private String email;
+    private String email; // Email from GitHub (might be null)
 
-    // Avatar URL from GitHub
     private String avatarUrl;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
-    private AuthProvider provider = AuthProvider.TELEGRAM; // Main provider - telegram
+    private AuthProvider provider = AuthProvider.TELEGRAM;
 
-    private LocalDateTime lastLogin; // Time of the last login via OAuth provider
+    private LocalDateTime lastLogin;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
-    // Constructor for a new user from Telegram
+    @Column(length = 1024)
+    private String lastAnalyzedRepoUrl;
+
+    @Column(length = 2048)
+    private String processedSchemaPath; // Renamed: Path to the generated schema JSON file
+
     public AppUser(String telegramId) {
         this.telegramId = telegramId;
-        this.provider = AuthProvider.TELEGRAM; // Default
+        this.provider = AuthProvider.TELEGRAM;
     }
 
     @PrePersist
@@ -76,10 +76,18 @@ public class AppUser {
     public void updateFromGitHub(String githubId, String login, String name, String email, String avatarUrl) {
         this.githubId = githubId;
         this.githubLogin = login;
-        this.name = (name != null) ? name : this.name; // Do not overwrite with null if the name already existed
-        this.email = (email != null) ? email : this.email;
+        this.name = (name != null) ? name : this.name;
+        this.email = email;
         this.avatarUrl = avatarUrl;
-        this.provider = AuthProvider.GITHUB; // Indicate that the GitHub link is established
+        if (this.provider == AuthProvider.TELEGRAM) {
+            this.provider = AuthProvider.GITHUB;
+        }
         this.lastLogin = LocalDateTime.now();
+    }
+
+    // Updated method name to reflect it saves the schema path
+    public void setAnalysisResults(String repoUrl, String schemaPath) {
+        this.lastAnalyzedRepoUrl = repoUrl;
+        this.processedSchemaPath = schemaPath;
     }
 }

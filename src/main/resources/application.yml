@@ -39,3 +39,18 @@ spring:
       state:
         ttl:
           minutes: 10
+    analysis:
+      output:
+        # Base path on the server to store processed entity folders
+        base-path: /tmp/cognitivequery/processed
+
+telegram:
+  bot:
+    username: cognitivequery_bot
+    token: 7636713589:AAFA3_CuXaDs2v_Wm9SJKDaJ9jKu0zY6uko
+
+backend:
+  api:
+    # URL, по которому бот будет обращаться к вашему Spring Boot приложению
+    # Если бот и бэкенд работают на одной машине для тестов:
+    base-url: http://localhost:8080

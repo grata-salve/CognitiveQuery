@@ -46,7 +46,8 @@ public class GithubApiService {
 
         log.debug("Exchanging code for token with URL: {}", githubTokenUrl);
 
-        ParameterizedTypeReference<Map<String, String>> typeRef = new ParameterizedTypeReference<>() {};
+        ParameterizedTypeReference<Map<String, String>> typeRef = new ParameterizedTypeReference<>() {
+        };
 
         Map<String, String> response = webClient.post()
                 .uri(githubTokenUrl)
@@ -72,7 +73,8 @@ public class GithubApiService {
 
     public Map<String, Object> getUserInfo(String accessToken) {
         log.debug("Fetching user info from: {}", githubUserInfoUrl);
-        ParameterizedTypeReference<Map<String, Object>> typeRef = new ParameterizedTypeReference<>() {};
+        ParameterizedTypeReference<Map<String, Object>> typeRef = new ParameterizedTypeReference<>() {
+        };
 
         Map<String, Object> userInfo = webClient.get()
                 .uri(githubUserInfoUrl)

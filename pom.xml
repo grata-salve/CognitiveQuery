@@ -5,7 +5,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.4.4</version>
+        <version>3.4.4</version> <!-- Оставляем 3.4.4 по вашему запросу -->
         <relativePath/>
     </parent>
     <groupId>com.example</groupId>
@@ -17,8 +17,8 @@
     <properties>
         <java.version>21</java.version>
         <jgit.version>6.9.0.202403050737-r</jgit.version>
-        <reflections.version>0.10.2</reflections.version>
-        <javaparser.version>3.25.10</javaparser.version>
+        <javaparser.version>3.25.10</javaparser.version> <!-- Используем одну версию -->
+        <telegrambots.version>6.9.7.1</telegrambots.version>
     </properties>
 
     <dependencies>
@@ -57,13 +57,16 @@
             <artifactId>lombok</artifactId>
             <optional>true</optional>
         </dependency>
+        <dependency> <!-- Jackson нужен для сериализации JSON -->
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+        <dependency> <!-- Для поддержки Java Time API в Jackson -->
+            <groupId>com.fasterxml.jackson.datatype</groupId>
+            <artifactId>jackson-datatype-jsr310</artifactId>
+        </dependency>
 
         <!-- Project Analysis -->
-        <dependency>
-            <groupId>org.reflections</groupId>
-            <artifactId>reflections</artifactId>
-            <version>${reflections.version}</version>
-        </dependency>
         <dependency>
             <groupId>org.eclipse.jgit</groupId>
             <artifactId>org.eclipse.jgit</artifactId>
@@ -73,6 +76,20 @@
             <groupId>com.github.javaparser</groupId>
             <artifactId>javaparser-core</artifactId>
             <version>${javaparser.version}</version>
+        </dependency>
+        <!-- !!! ДОБАВЛЕНА ЗАВИСИМОСТЬ ДЛЯ SYMBOL SOLVER !!! -->
+        <dependency>
+            <groupId>com.github.javaparser</groupId>
+            <artifactId>javaparser-symbol-solver-core</artifactId>
+            <version>${javaparser.version}</version>
+        </dependency>
+        <!-- REMOVED: org.reflections - не используется -->
+
+        <!-- Telegram -->
+        <dependency>
+            <groupId>org.telegram</groupId>
+            <artifactId>telegrambots-spring-boot-starter</artifactId>
+            <version>${telegrambots.version}</version>
         </dependency>
 
         <!-- Testing -->
@@ -111,7 +128,7 @@
                         <path>
                             <groupId>org.projectlombok</groupId>
                             <artifactId>lombok</artifactId>
-                            <version>${lombok.version}</version>
+                            <version>${lombok.version}</version> <!-- Управляется Spring Boot Parent -->
                         </path>
                     </annotationProcessorPaths>
                 </configuration>
