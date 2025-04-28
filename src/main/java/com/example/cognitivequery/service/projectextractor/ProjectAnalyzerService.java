@@ -1,7 +1,7 @@
 package com.example.cognitivequery.service.projectextractor;
 
-import com.example.cognitivequery.model.ir.SchemaInfo; // Import IR model
-import com.example.cognitivequery.service.parser.SchemaParserService; // Import Parser service
+import com.example.cognitivequery.model.ir.SchemaInfo;
+import com.example.cognitivequery.service.parser.SchemaParserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
@@ -18,10 +18,10 @@ import java.util.UUID;
 @Slf4j
 public class ProjectAnalyzerService {
     private final GitCloneService gitCloneService;
-    private final SchemaParserService schemaParserService; // Use the parser service
+    private final SchemaParserService schemaParserService;
 
     @Value("${app.analysis.output.base-path:/tmp/cognitivequery/processed}")
-    private String processedSchemaBasePath; // Renamed for clarity
+    private String processedSchemaBasePath;
 
     /**
      * Clones a Git repository, parses JPA entities into a schema IR (JSON),
@@ -38,20 +38,15 @@ public class ProjectAnalyzerService {
         Path schemaFilePath = null;
         try {
             log.info("Starting analysis and schema parsing for Git URL: {}", gitUrl);
-            // 1. Clone repository
             projectPath = gitCloneService.cloneRepository(gitUrl);
             log.info("Repository cloned successfully to: {}", projectPath);
 
-            // 2. Parse the project source code to generate SchemaInfo IR
-            // Pass the source root directory (assuming standard Maven/Gradle structure)
-            // Adjust if your source structure is different (e.g., projectPath might be the root)
-            Path sourceRoot = projectPath; // Or projectPath.resolve("src/main/java") if needed
+            Path sourceRoot = projectPath; // Assume standard layout where projectPath is the root containing src
             SchemaInfo schemaInfo = schemaParserService.parseProject(sourceRoot, gitUrl);
             log.info("Project source parsed. Found {} entities.", schemaInfo.getEntities().size());
 
-            // 3. Define output path and save SchemaInfo to JSON file
             Path baseOutputPath = Paths.get(processedSchemaBasePath);
-            Files.createDirectories(baseOutputPath); // Ensure base path exists
+            Files.createDirectories(baseOutputPath);
 
             String schemaFileName = "schema-" + safeUrlToFilePart(gitUrl) + "-" + UUID.randomUUID() + ".json";
             schemaFilePath = baseOutputPath.resolve(schemaFileName);
@@ -59,13 +54,12 @@ public class ProjectAnalyzerService {
             schemaParserService.writeSchemaToJsonFile(schemaInfo, schemaFilePath);
             log.info("Schema IR saved to: {}", schemaFilePath);
 
-            return schemaFilePath; // Return the path to the JSON file
+            return schemaFilePath;
 
         } catch (Exception e) {
             log.error("Failed to process project and generate schema from Git URL: {}", gitUrl, e);
-            // Clean up partially cloned repo if cloning failed mid-way or parsing failed
             if (projectPath != null && Files.exists(projectPath)) {
-                if (cleanupClone) { // Only cleanup if requested
+                if (cleanupClone) {
                     log.info("Attempting cleanup due to error for path: {}", projectPath);
                     try {
                         EntityFileProcessor.deleteDirectoryRecursively(projectPath);
@@ -78,7 +72,6 @@ public class ProjectAnalyzerService {
             }
             throw new RuntimeException("Failed to process project/generate schema from URL: " + gitUrl + ". Reason: " + e.getMessage(), e);
         } finally {
-            // 4. Cleanup successfully cloned directory if processing succeeded
             if (schemaFilePath != null && cleanupClone && projectPath != null && Files.exists(projectPath)) {
                 log.info("Processing successful. Cleaning up cloned project path: {}", projectPath);
                 try {
@@ -92,15 +85,12 @@ public class ProjectAnalyzerService {
         }
     }
 
-    // Overload defaulting cleanup to true
-    public Path analyzeAndProcessProject(String gitUrl) {
-        return analyzeAndProcessProject(gitUrl, true);
-    }
+    // REMOVED unused overload
+    // public Path analyzeAndProcessProject(String gitUrl) { ... }
 
-    // Helper to create a safe file name part from URL
     private String safeUrlToFilePart(String url) {
-        return url.replaceAll("[^a-zA-Z0-9.-]", "_") // Replace non-alphanumeric chars with underscore
-                .replaceAll("_+", "_") // Collapse multiple underscores
-                .substring(0, Math.min(url.length(), 50)); // Limit length
+        return url.replaceAll("[^a-zA-Z0-9.\\-_]", "_") // Allow dots, hyphens, underscores
+                .replaceAll("_+", "_")
+                .substring(0, Math.min(url.length(), 50));
     }
 }
