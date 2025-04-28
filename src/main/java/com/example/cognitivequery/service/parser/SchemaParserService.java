@@ -1,20 +1,20 @@
 package com.example.cognitivequery.service.parser;
 
-import com.example.cognitivequery.model.ir.*; // Import all IR models
+import com.example.cognitivequery.model.ir.EmbeddableInfo;
+import com.example.cognitivequery.model.ir.SchemaInfo;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
-import com.github.javaparser.JavaParser;
+import com.github.javaparser.ParseResult;
 import com.github.javaparser.ParserConfiguration;
-import com.github.javaparser.ParseResult; // Import ParseResult
 import com.github.javaparser.ast.CompilationUnit;
+import com.github.javaparser.ast.CompilationUnit.Storage;
 import com.github.javaparser.symbolsolver.JavaSymbolSolver;
 import com.github.javaparser.symbolsolver.resolution.typesolvers.CombinedTypeSolver;
 import com.github.javaparser.symbolsolver.resolution.typesolvers.JavaParserTypeSolver;
 import com.github.javaparser.symbolsolver.resolution.typesolvers.ReflectionTypeSolver;
-import com.github.javaparser.utils.SourceRoot;
-import com.github.javaparser.utils.ProjectRoot;
 import com.github.javaparser.utils.ParserCollectionStrategy;
-import com.github.javaparser.ast.CompilationUnit.Storage; // Import Storage
+import com.github.javaparser.utils.ProjectRoot;
+import com.github.javaparser.utils.SourceRoot;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
@@ -22,14 +22,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional; // Import Optional
+import java.util.*;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 @Service
 @Slf4j
@@ -65,7 +59,6 @@ public class SchemaParserService {
 
         JavaSymbolSolver symbolSolver = new JavaSymbolSolver(typeSolver);
         ParserConfiguration parserConfig = new ParserConfiguration().setSymbolResolver(symbolSolver);
-        // JavaParser javaParser = new JavaParser(parserConfig); // Not needed if setting config on SourceRoot
 
         Map<String, JpaAnnotationVisitor.MappedSuperclassInfo> mappedSuperclasses = new HashMap<>();
         List<EmbeddableInfo> embeddables = new ArrayList<>();
@@ -75,11 +68,9 @@ public class SchemaParserService {
         for (SourceRoot sourceRoot : sourceRoots) {
             log.info("Parsing source root: {}", sourceRoot.getRoot());
             try {
-                // *** Set the parser config for THIS SourceRoot ***
                 sourceRoot.setParserConfiguration(parserConfig);
                 List<ParseResult<CompilationUnit>> parseResults = sourceRoot.tryToParse("");
                 for (ParseResult<CompilationUnit> result : parseResults) {
-                    // *** ИСПРАВЛЕНИЕ: Get Storage correctly ***
                     Optional<Path> filePathOpt = result.getResult() // Optional<CompilationUnit>
                             .flatMap(CompilationUnit::getStorage) // Optional<Storage>
                             .map(Storage::getPath); // Optional<Path>
@@ -97,18 +88,20 @@ public class SchemaParserService {
             }
         }
 
-        if (allCus.isEmpty()){
+        if (allCus.isEmpty()) {
             log.error("No compilation units were successfully parsed from project sources at {}", projectRootPath);
             return schemaInfo;
         }
         log.info("Successfully parsed {} compilation units.", allCus.size());
 
-        // First pass
         log.debug("Starting first pass: Parsing MappedSuperclasses and Embeddables");
         JpaAnnotationVisitor firstPassVisitor = new JpaAnnotationVisitor(mappedSuperclasses, embeddables);
         allCus.forEach(cu -> {
-            try { firstPassVisitor.visit(cu, JpaAnnotationVisitor.ProcessingPass.FIRST_PASS); }
-            catch (Exception e) { log.warn("Error during first pass visit for CU from {}: {}", cu.getStorage().map(s -> s.getPath().toString()).orElse("UNKNOWN"), e.getMessage()); }
+            try {
+                firstPassVisitor.visit(cu, JpaAnnotationVisitor.ProcessingPass.FIRST_PASS);
+            } catch (Exception e) {
+                log.warn("Error during first pass visit for CU from {}: {}", cu.getStorage().map(s -> s.getPath().toString()).orElse("UNKNOWN"), e.getMessage());
+            }
         });
         log.info("First pass complete. Found {} mapped superclasses, {} embeddables.", mappedSuperclasses.size(), embeddables.size());
 
@@ -117,8 +110,11 @@ public class SchemaParserService {
         schemaInfo.setEntities(new ArrayList<>());
         JpaAnnotationVisitor secondPassVisitor = new JpaAnnotationVisitor(mappedSuperclasses, embeddables, schemaInfo);
         allCus.forEach(cu -> {
-            try { secondPassVisitor.visit(cu, JpaAnnotationVisitor.ProcessingPass.SECOND_PASS); }
-            catch (Exception e) { log.warn("Error during second pass visit for CU from {}: {}", cu.getStorage().map(s -> s.getPath().toString()).orElse("UNKNOWN"), e.getMessage()); }
+            try {
+                secondPassVisitor.visit(cu, JpaAnnotationVisitor.ProcessingPass.SECOND_PASS);
+            } catch (Exception e) {
+                log.warn("Error during second pass visit for CU from {}: {}", cu.getStorage().map(s -> s.getPath().toString()).orElse("UNKNOWN"), e.getMessage());
+            }
         });
         log.info("Second pass complete. Parsed {} entities.", schemaInfo.getEntities().size());
 

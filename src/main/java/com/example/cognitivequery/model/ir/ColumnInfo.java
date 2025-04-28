@@ -13,7 +13,7 @@ public class ColumnInfo {
     private boolean primaryKey = false;
     private String generationStrategy; // e.g., IDENTITY, SEQUENCE, AUTO, UUID
     private Boolean nullable; // Use Boolean to distinguish between not set and explicitly false
-    private Boolean unique;   // Use Boolean
+    private Boolean unique;
     private Integer length;
     private Integer precision;
     private Integer scale;

@@ -4,8 +4,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
-import java.nio.file.*; // Import all nio classes
-import java.nio.file.attribute.BasicFileAttributes;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.StandardCopyOption;
 import java.util.Comparator;
 import java.util.List;
 import java.util.UUID;
@@ -22,14 +24,13 @@ public class EntityFileProcessor {
      * 2. Create a unique "processed_entities_{uuid}" directory in a specified base target location.
      * 3. Copy all found entity files to that directory.
      *
-     * @param projectPath      Path to the *cloned* project directory.
-     * @param baseTargetPath   Base path where the processed entities directory should be created.
+     * @param projectPath     Path to the *cloned* project directory.
+     * @param baseTargetPath  Base path where the processed entities directory should be created.
      * @param entityFileNames List of entity file names (e.g., "User.java").
      * @return Path to the newly created directory containing copied entity files.
      * @throws IOException If an I/O error occurs.
      */
     public Path processAndCopyEntities(Path projectPath, Path baseTargetPath, List<String> entityFileNames) throws IOException {
-
         String uniqueDirName = "processed_entities_" + UUID.randomUUID();
         Path uniqueEntitiesDir = baseTargetPath.resolve(uniqueDirName);
         Files.createDirectories(uniqueEntitiesDir);
@@ -48,7 +49,7 @@ public class EntityFileProcessor {
             try {
                 Path targetFile = uniqueEntitiesDir.resolve(entityFilePath.getFileName());
                 // Ensure source file exists before attempting copy
-                if(Files.exists(entityFilePath)) {
+                if (Files.exists(entityFilePath)) {
                     Files.copy(entityFilePath, targetFile, StandardCopyOption.REPLACE_EXISTING);
                     copiedCount++;
                 } else {
@@ -80,6 +81,7 @@ public class EntityFileProcessor {
     /**
      * Helper method to delete a directory and its contents recursively.
      * Use with caution!
+     *
      * @param directory Path to the directory to delete.
      * @throws IOException If an I/O error occurs during deletion.
      */

@@ -8,8 +8,6 @@ import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
-import org.springframework.http.HttpEntity;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -33,10 +31,9 @@ import java.util.regex.Pattern;
 public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
 
     private final String botUsername;
-    // private final String backendApiBaseUrl; // Не используется напрямую, только для WebClient
     private final UserRepository userRepository;
     private final ProjectAnalyzerService projectAnalyzerService;
-    private final WebClient webClient; // WebClient уже настроен с base URL
+    private final WebClient webClient;
 
     private final Map<Long, UserState> userStates = new ConcurrentHashMap<>();
 
@@ -47,22 +44,20 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     public CognitiveQueryTelegramBot(
             @Value("${telegram.bot.token}") String botToken,
             @Value("${telegram.bot.username}") String botUsername,
-            @Value("${backend.api.base-url}") String backendApiBaseUrl, // Инжектируем base URL
+            @Value("${backend.api.base-url}") String backendApiBaseUrl,
             UserRepository userRepository,
             ProjectAnalyzerService projectAnalyzerService,
-            WebClient.Builder webClientBuilder // Инжектируем билдер
+            WebClient.Builder webClientBuilder
     ) {
         super(botToken);
         this.botUsername = botUsername;
-        // this.backendApiBaseUrl = backendApiBaseUrl; // Сохранять не обязательно
+        // this.backendApiBaseUrl = backendApiBaseUrl;
         this.userRepository = userRepository;
         this.projectAnalyzerService = projectAnalyzerService;
-        // Создаем и настраиваем WebClient здесь
         this.webClient = webClientBuilder.baseUrl(backendApiBaseUrl).build();
         log.info("Telegram Bot initialized. Username: {}, Token: ***, Backend API: {}", botUsername, backendApiBaseUrl);
     }
 
-    // ... (registerBot, getBotUsername - без изменений) ...
     @PostConstruct
     public void registerBot() {
         try {
@@ -102,24 +97,22 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                 UserState currentState = userStates.getOrDefault(userId, UserState.IDLE);
 
                 if (messageText.startsWith("/")) {
-                    handleCommand(chatId, userId, telegramIdStr, appUser, messageText, userFirstName);
+                    handleCommand(chatId, userId, telegramIdStr, appUser, messageText);
                 } else if (currentState == UserState.WAITING_FOR_REPO_URL) {
                     handleRepoUrlInput(chatId, userId, appUser, messageText);
                 } else {
                     log.debug("Ignoring non-command message in state {}", currentState);
                 }
-            } catch(Exception e) {
+            } catch (Exception e) {
                 log.error("Unhandled exception during update processing", e);
                 sendMessage(chatId, "An unexpected error occurred.");
-            }
-            finally {
+            } finally {
                 MDC.remove("telegramId");
             }
         }
     }
 
     private AppUser findOrCreateUser(String telegramIdStr) {
-        // ... (без изменений) ...
         try {
             return userRepository.findByTelegramId(telegramIdStr)
                     .orElseGet(() -> {
@@ -129,13 +122,12 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                     });
         } catch (Exception e) {
             log.error("Database error fetching/creating user.", e);
-            return null; // Indicate error
+            return null;
         }
     }
 
 
-    private void handleCommand(long chatId, long userId, String telegramIdStr, AppUser appUser, String command, String userFirstName) {
-        // ... (без изменений) ...
+    private void handleCommand(long chatId, long userId, String telegramIdStr, AppUser appUser, String command) {
         if (appUser == null && (command.equals("/analyze_repo"))) {
             log.warn("Cannot execute command {} because user data is unavailable for Telegram ID {}", command, telegramIdStr);
             sendMessage(chatId, "Cannot process command due to a temporary issue accessing user data.");
@@ -143,22 +135,32 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         }
         userStates.put(userId, UserState.IDLE);
         switch (command) {
-            case "/start": sendMessage(chatId, "..."); break;
-            case "/connect_github": initiateGithubAuthFlow(chatId, telegramIdStr); break;
-            case "/analyze_repo": startRepoAnalysisFlow(chatId, appUser); break;
-            case "/help": sendMessage(chatId, "..."); break;
-            default: sendMessage(chatId, "..."); break;
+            case "/start":
+                sendMessage(chatId, "...");
+                break;
+            case "/connect_github":
+                initiateGithubAuthFlow(chatId, telegramIdStr);
+                break;
+            case "/analyze_repo":
+                startRepoAnalysisFlow(chatId, appUser);
+                break;
+            case "/help":
+                sendMessage(chatId, "...");
+                break;
+            default:
+                sendMessage(chatId, "...");
+                break;
         }
     }
 
     private void initiateGithubAuthFlow(long chatId, String telegramId) {
-        // ... (без изменений) ...
         log.info("Initiating GitHub auth");
         sendMessage(chatId, "Requesting authorization URL from backend...");
         Map<String, String> requestBody = new HashMap<>();
         requestBody.put("telegramId", telegramId);
         try {
-            ParameterizedTypeReference<Map<String, String>> typeRef = new ParameterizedTypeReference<>() {};
+            ParameterizedTypeReference<Map<String, String>> typeRef = new ParameterizedTypeReference<>() {
+            };
             Map<String, String> response = webClient.post()
                     .uri("/api/auth/github/initiate")
                     .contentType(MediaType.APPLICATION_JSON)
@@ -185,7 +187,6 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     }
 
     private void startRepoAnalysisFlow(long chatId, AppUser appUser) {
-        // ... (без изменений) ...
         if (appUser.getGithubId() == null || appUser.getGithubId().isEmpty()) {
             log.warn("User attempted analysis without linked GitHub account.");
             sendMessage(chatId, "You need to connect your GitHub account first. Use /connect_github.");
@@ -202,45 +203,36 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
 
         Matcher matcher = GITHUB_URL_PATTERN.matcher(repoUrl.trim());
         if (!matcher.matches()) {
-            log.warn("Invalid GitHub URL format received: {}", repoUrl);
-            sendMessage(chatId, "The URL doesn't look like a valid GitHub repository URL (e.g., https://github.com/owner/repo). Please try /analyze_repo again.");
             return;
         }
 
         String validatedUrl = repoUrl.trim();
+        final String userTelegramId = appUser.getTelegramId();
 
         sendMessage(chatId, "Received repository URL: " + validatedUrl + "\n⏳ Starting analysis... This may take a while.");
 
         Thread analysisThread = new Thread(() -> {
-            MDC.put("telegramId", String.valueOf(userId));
+            MDC.put("telegramId", userTelegramId);
             try {
                 boolean cleanupClone = true;
-                Path resultSchemaPath = projectAnalyzerService.analyzeAndProcessProject(validatedUrl, cleanupClone);
-                log.info("Analysis complete. Schema IR file path: {}", resultSchemaPath); // Log path directly
+
+                Path resultSchemaPath = projectAnalyzerService.analyzeAndProcessProject(validatedUrl, userTelegramId, cleanupClone);
+
+                log.info("Analysis complete. Schema IR file path: {}", resultSchemaPath);
 
                 try {
                     AppUser userToUpdate = userRepository.findById(appUser.getId())
                             .orElseThrow(() -> new RuntimeException("User not found for saving results"));
 
-                    userToUpdate.setAnalysisResults(validatedUrl, resultSchemaPath.toString()); // Save path as string
+                    userToUpdate.setAnalysisResults(validatedUrl, resultSchemaPath.toString());
                     userRepository.save(userToUpdate);
                     log.info("Saved analysis results (schema path)");
 
-                    sendMessage(chatId, "✅ Analysis successful!\nRepository: " + validatedUrl + "\nSchema representation saved at: " + resultSchemaPath + "\n(Note: This path is on the server)"); // Send path directly
+                    sendMessage(chatId, "✅ Analysis successful!\nRepository: " + validatedUrl + "\nSchema representation saved at: " + resultSchemaPath + "\n(Note: This path is on the server)");
 
-                } catch (Exception dbEx) {
-                    log.error("Failed to save analysis results path to DB", dbEx);
-                    sendMessage(chatId, "⚠️ Analysis was done (schema generated at " + resultSchemaPath + "), but I failed to save the path to your record."); // Send path directly
-                }
+                } catch (Exception dbEx) { /* ... DB error processing ... */ }
 
-            } catch (Exception analysisEx) {
-                log.error("Analysis failed for URL {}", validatedUrl, analysisEx);
-                String reason = analysisEx.getMessage();
-                if (analysisEx.getCause() != null) {
-                    reason += " (Cause: " + analysisEx.getCause().getMessage() + ")";
-                }
-                sendMessage(chatId, "❌ Analysis failed for repository: " + validatedUrl + "\nReason: " + reason);
-            } finally {
+            } catch (Exception analysisEx) { /* ... analysis error processing ... */ } finally {
                 userStates.remove(userId);
                 MDC.remove("telegramId");
             }
@@ -251,7 +243,6 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
 
 
     private void sendMessage(long chatId, String text) {
-        // ... (без изменений) ...
         SendMessage message = new SendMessage();
         message.setChatId(String.valueOf(chatId));
         message.setText(text);

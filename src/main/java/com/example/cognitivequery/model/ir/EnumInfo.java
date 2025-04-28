@@ -2,6 +2,7 @@ package com.example.cognitivequery.model.ir;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Data;
+
 import java.util.List;
 
 @Data

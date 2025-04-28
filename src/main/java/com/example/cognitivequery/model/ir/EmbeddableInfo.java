@@ -1,6 +1,7 @@
 package com.example.cognitivequery.model.ir;
 
 import lombok.Data;
+
 import java.util.ArrayList;
 import java.util.List;
 

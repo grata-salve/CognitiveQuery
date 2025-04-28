@@ -1,19 +1,16 @@
 package com.example.cognitivequery.service.parser;
 
-// ... (все импорты остаются) ...
 
 import com.example.cognitivequery.model.ir.*;
 import com.github.javaparser.StaticJavaParser;
 import com.github.javaparser.ast.CompilationUnit;
 import com.github.javaparser.ast.Node;
-import com.github.javaparser.ast.NodeList;
 import com.github.javaparser.ast.body.ClassOrInterfaceDeclaration;
 import com.github.javaparser.ast.body.FieldDeclaration;
-import com.github.javaparser.ast.expr.*;
-import com.github.javaparser.ast.type.ClassOrInterfaceType;
+import com.github.javaparser.ast.expr.AnnotationExpr;
+import com.github.javaparser.ast.expr.Expression;
+import com.github.javaparser.ast.expr.MemberValuePair;
 import com.github.javaparser.ast.visitor.VoidVisitorAdapter;
-import com.github.javaparser.resolution.UnsolvedSymbolException;
-import com.github.javaparser.resolution.declarations.ResolvedFieldDeclaration;
 import com.github.javaparser.resolution.declarations.ResolvedReferenceTypeDeclaration;
 import com.github.javaparser.resolution.types.ResolvedPrimitiveType;
 import com.github.javaparser.resolution.types.ResolvedReferenceType;
@@ -29,7 +26,6 @@ import java.util.stream.Collectors;
 @Slf4j
 public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
 
-    // ... (enum ProcessingPass, поля, конструкторы - без изменений) ...
     public enum ProcessingPass {FIRST_PASS, SECOND_PASS}
 
     private final Map<String, MappedSuperclassInfo> mappedSuperclasses;
@@ -47,14 +43,14 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         this.schemaInfo = schemaInfo;
     }
 
-    // --- VISITOR METHODS (Без изменений) ---
+    // --- VISITOR METHODS
     @Override
     public void visit(CompilationUnit cu, Object arg) {
         super.visit(cu, arg);
     }
 
     @Override
-    public void visit(ClassOrInterfaceDeclaration cl, Object arg) { /* ... (без изменений) ... */
+    public void visit(ClassOrInterfaceDeclaration cl, Object arg) {
         super.visit(cl, arg);
         if (cl.isInterface() || !(cl.isAnnotationPresent("Entity") || cl.isAnnotationPresent("MappedSuperclass") || cl.isAnnotationPresent("Embeddable"))) {
             return;
@@ -101,8 +97,8 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         }
     }
 
-    // --- PARSING LOGIC (Без изменений в parseMappedSuperclass, parseEmbeddable, parseEntity, addInherited*, parseField, parseBasicColumn) ---
-    private MappedSuperclassInfo parseMappedSuperclass(ClassOrInterfaceDeclaration cl) { /* ... (без изменений) ... */
+    // --- PARSING LOGIC
+    private MappedSuperclassInfo parseMappedSuperclass(ClassOrInterfaceDeclaration cl) {
         String className = cl.getFullyQualifiedName().orElse(cl.getNameAsString());
         log.trace("Parsing MappedSuperclass details for: {}", className);
         MappedSuperclassInfo info = new MappedSuperclassInfo();
@@ -114,7 +110,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         return info;
     }
 
-    private EmbeddableInfo parseEmbeddable(ClassOrInterfaceDeclaration cl) { /* ... (без изменений) ... */
+    private EmbeddableInfo parseEmbeddable(ClassOrInterfaceDeclaration cl) {
         String className = cl.getFullyQualifiedName().orElse(cl.getNameAsString());
         log.trace("Parsing Embeddable details for: {}", className);
         EmbeddableInfo info = new EmbeddableInfo();
@@ -125,7 +121,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         return info;
     }
 
-    private EntityInfo parseEntity(ClassOrInterfaceDeclaration cl) { /* ... (без изменений) ... */
+    private EntityInfo parseEntity(ClassOrInterfaceDeclaration cl) {
         String className = cl.getFullyQualifiedName().orElse(cl.getNameAsString());
         log.trace("Parsing Entity details for: {}", className);
         EntityInfo info = new EntityInfo();
@@ -155,7 +151,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         return info;
     }
 
-    private void addInheritedMappedSuperclassFields(ClassOrInterfaceDeclaration cl, MappedSuperclassInfo currentInfo) { /* ... (без изменений) ... */
+    private void addInheritedMappedSuperclassFields(ClassOrInterfaceDeclaration cl, MappedSuperclassInfo currentInfo) {
         cl.getExtendedTypes().stream().findFirst().ifPresent(extendedType -> {
             try {
                 ResolvedType resolved = extendedType.resolve();
@@ -182,7 +178,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         });
     }
 
-    private void addInheritedMembers(EntityInfo entityInfo, String superClassName, ClassOrInterfaceDeclaration entityClassDecl) { /* ... (без изменений) ... */
+    private void addInheritedMembers(EntityInfo entityInfo, String superClassName, ClassOrInterfaceDeclaration entityClassDecl) {
         MappedSuperclassInfo parentInfo = mappedSuperclasses.get(superClassName);
         if (parentInfo == null) return;
         Map<String, String> columnOverrides = getAttributeOverrides(entityClassDecl.getAnnotationByName("AttributeOverrides").orElse(null));
@@ -202,7 +198,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         });
     }
 
-    private void parseField(FieldDeclaration field, List<ColumnInfo> columns, List<RelationshipInfo> relationships, EntityInfo entityContext, MappedSuperclassInfo superclassContext, boolean isEmbeddedAttribute, boolean inheritedFromMappedSuperclass) { /* ... (без изменений) ... */
+    private void parseField(FieldDeclaration field, List<ColumnInfo> columns, List<RelationshipInfo> relationships, EntityInfo entityContext, MappedSuperclassInfo superclassContext, boolean isEmbeddedAttribute, boolean inheritedFromMappedSuperclass) {
         if (field.isStatic() || field.isTransient() || field.isAnnotationPresent("Transient")) {
             return;
         }
@@ -271,7 +267,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         });
     }
 
-    private ColumnInfo parseBasicColumn(FieldDeclaration field, String fieldName, String fieldType, ResolvedType resolvedType) { /* ... (без изменений) ... */
+    private ColumnInfo parseBasicColumn(FieldDeclaration field, String fieldName, String fieldType, ResolvedType resolvedType) {
         ColumnInfo col = new ColumnInfo();
         col.setFieldName(fieldName);
         col.setJavaType(fieldType);
@@ -315,7 +311,6 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
     }
 
 
-    // --- Метод parseRelationship (С ИСПРАВЛЕНИЯМИ ВЫЗОВОВ) ---
     private RelationshipInfo parseRelationship(FieldDeclaration field, String fieldName, String fieldType, ResolvedType resolvedFieldType) {
         RelationshipInfo rel = new RelationshipInfo();
         rel.setFieldName(fieldName);
@@ -330,7 +325,6 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
             }
         }
 
-        // *** FIX: Call instance method parseCommonRelationshipAttributes ***
         if (field.isAnnotationPresent("OneToOne")) {
             rel.setType("OneToOne");
             field.getAnnotationByName("OneToOne").ifPresent(ann -> parseCommonRelationshipAttributes(rel, ann));
@@ -356,7 +350,6 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         } else {
             return null;
         }
-        // *** END FIX ***
 
         if (targetEntityType == null || targetEntityType.equals("UNKNOWN") || targetEntityType.equals("java.lang.Object") || targetEntityType.equals("ERROR_RESOLVING_TYPE")) {
             log.warn("Could not determine target entity type for relationship field: {}. Annotation: {}", fieldName, rel.getType());
@@ -383,7 +376,6 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         return rel;
     }
 
-    // --- Instance Helper Method ---
     private void parseCommonRelationshipAttributes(RelationshipInfo rel, AnnotationExpr ann) { // Instance method
         extractAnnotationAttribute(ann, "mappedBy").ifPresent(rel::setMappedBy); // Static call OK
         extractAnnotationAttribute(ann, "fetch").ifPresentOrElse( // Static call OK
@@ -400,25 +392,21 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         }
     }
 
-    // --- STATIC HELPER METHODS ---
 
-    private static boolean isRelationship(FieldDeclaration field) { /* ... (без изменений) ... */
+    private static boolean isRelationship(FieldDeclaration field) {
         return field.isAnnotationPresent("OneToOne") || field.isAnnotationPresent("OneToMany") || field.isAnnotationPresent("ManyToOne") || field.isAnnotationPresent("ManyToMany");
     }
 
-    // *** ИСПРАВЛЕННЫЙ getResolvedTypeName ***
     private static String getResolvedTypeName(ResolvedType resolvedType) {
         try {
             if (resolvedType.isReferenceType()) {
                 ResolvedReferenceType refType = resolvedType.asReferenceType();
                 if (refType.getQualifiedName().equals("java.util.Optional")) {
-                    // *** FIX: Use lambda for Optional.isPresent() ***
                     Optional<ResolvedType> typeParamOpt = refType.getTypeParametersMap().stream()
                             .map(pair -> Optional.ofNullable(pair.b))               // Map to Optional<ResolvedType>
                             .filter(Optional::isPresent) // Filter non-empty Optionals using lambda
                             .map(Optional::get)          // Get ResolvedType from Optional
                             .findFirst();                  // Get the first type parameter
-                    // *** END FIX ***
                     if (typeParamOpt.isPresent()) {
                         return "Optional<" + getResolvedTypeName(typeParamOpt.get()) + ">";
                     } else {
@@ -450,13 +438,13 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         try {
             if (resolvedFieldType != null && resolvedFieldType.isReferenceType()) {
                 ResolvedReferenceType refType = resolvedFieldType.asReferenceType();
-                // *** FIX: Use lambda for Optional.isPresent() ***
+
                 Optional<ResolvedType> typeArgOpt = refType.getTypeParametersMap().stream()
                         .map(pair -> Optional.ofNullable(pair.b))         // Map to Optional<ResolvedType>
                         .filter(Optional::isPresent) // Use lambda here
                         .map(Optional::get)         // Extract ResolvedType
                         .findFirst();                  // Get the first one
-                // *** END FIX ***
+
                 if (typeArgOpt.isPresent()) {
                     return getResolvedTypeName(typeArgOpt.get());
                 } else {
@@ -469,7 +457,6 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         return "java.lang.Object";
     }
 
-    // ... (Остальные статические хелперы: extract*, getStringValue, toSnakeCase, createMap, guessSqlType, getOverrides, isOverriddenNullable - БЕЗ ИЗМЕНЕНИЙ) ...
     private static Optional<String> extractAnnotationAttribute(AnnotationExpr annotationExpr, String attributeName) {
         if (annotationExpr == null) return Optional.empty();
         final String targetAttribute = (attributeName == null || attributeName.isEmpty()) ? "value" : attributeName;
@@ -700,12 +687,11 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
     }
 
 
-    // --- Instance Helper Methods ---
-    private EmbeddableInfo findEmbeddableDefinition(String qualifiedClassName) { /* ... */
+    private EmbeddableInfo findEmbeddableDefinition(String qualifiedClassName) {
         return embeddables.stream().filter(e -> qualifiedClassName.equals(e.getJavaClassName())).findFirst().orElse(null);
     }
 
-    private ColumnInfo deepCopyColumnInfo(ColumnInfo original) { /* ... */
+    private ColumnInfo deepCopyColumnInfo(ColumnInfo original) {
         ColumnInfo copy = new ColumnInfo();
         copy.setFieldName(original.getFieldName());
         copy.setColumnName(original.getColumnName());
@@ -733,7 +719,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         return copy;
     }
 
-    private RelationshipInfo deepCopyRelationshipInfo(RelationshipInfo original) { /* ... */
+    private RelationshipInfo deepCopyRelationshipInfo(RelationshipInfo original) {
         RelationshipInfo copy = new RelationshipInfo();
         copy.setFieldName(original.getFieldName());
         copy.setType(original.getType());
@@ -751,7 +737,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         return copy;
     }
 
-    private void addIfNotPresent(List<ColumnInfo> list, ColumnInfo itemToAdd, boolean inherited, String inheritedFrom) { /* ... */
+    private void addIfNotPresent(List<ColumnInfo> list, ColumnInfo itemToAdd, boolean inherited, String inheritedFrom) {
         if (list.stream().noneMatch(existing -> existing.getFieldName().equals(itemToAdd.getFieldName()))) {
             itemToAdd.setInherited(inherited);
             if (inherited) itemToAdd.setInheritedFromClass(inheritedFrom);
@@ -765,7 +751,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         addIfNotPresent(list, itemToAdd, false, null);
     }
 
-    private void addIfNotPresent(List<RelationshipInfo> list, RelationshipInfo itemToAdd, boolean inherited, String inheritedFrom) { /* ... */
+    private void addIfNotPresent(List<RelationshipInfo> list, RelationshipInfo itemToAdd, boolean inherited, String inheritedFrom) {
         if (list.stream().noneMatch(existing -> existing.getFieldName().equals(itemToAdd.getFieldName()))) {
             itemToAdd.setInherited(inherited);
             if (inherited) itemToAdd.setInheritedFromClass(inheritedFrom);
@@ -775,7 +761,6 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         }
     }
 
-    // --- Inner Class ---
     @Data
     public static class MappedSuperclassInfo {
         private String javaClassName;

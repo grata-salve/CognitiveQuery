@@ -2,6 +2,7 @@ package com.example.cognitivequery.model.ir;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import lombok.Data;
+
 import java.util.List;
 
 @Data
@@ -20,6 +21,6 @@ public class RelationshipInfo {
     private String joinTableJoinColumnName;
     private String joinTableInverseJoinColumnName;
 
-    private Boolean inherited; // Use Boolean
+    private Boolean inherited;
     private String inheritedFromClass; // Fully qualified name
 }
