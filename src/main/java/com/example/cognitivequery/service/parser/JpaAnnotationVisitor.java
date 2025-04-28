@@ -13,9 +13,10 @@ import com.github.javaparser.ast.visitor.VoidVisitorAdapter;
 import com.github.javaparser.resolution.UnsolvedSymbolException;
 import com.github.javaparser.resolution.declarations.ResolvedFieldDeclaration;
 import com.github.javaparser.resolution.declarations.ResolvedReferenceTypeDeclaration;
-import com.github.javaparser.resolution.types.ResolvedPrimitiveType; // Import ResolvedPrimitiveType
+import com.github.javaparser.resolution.types.ResolvedPrimitiveType;
 import com.github.javaparser.resolution.types.ResolvedReferenceType;
 import com.github.javaparser.resolution.types.ResolvedType;
+import com.github.javaparser.resolution.types.ResolvedVoidType; // Import ResolvedVoidType
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 
@@ -33,19 +34,16 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
 
     private static final Map<String, String> JAVA_TO_SQL_TYPE_MAP = createJavaToSqlTypeMap();
 
-    // Constructor for FIRST_PASS
     public JpaAnnotationVisitor(Map<String, MappedSuperclassInfo> mappedSuperclasses, List<EmbeddableInfo> embeddables) {
         this(mappedSuperclasses, embeddables, null);
     }
 
-    // Main constructor used for SECOND_PASS
     public JpaAnnotationVisitor(Map<String, MappedSuperclassInfo> mappedSuperclasses, List<EmbeddableInfo> embeddables, SchemaInfo schemaInfo) {
         this.mappedSuperclasses = mappedSuperclasses;
-        this.embeddables = Objects.requireNonNullElseGet(embeddables, ArrayList::new); // Use initialized list
+        this.embeddables = Objects.requireNonNullElseGet(embeddables, ArrayList::new);
         this.schemaInfo = schemaInfo;
     }
 
-    // --- VISITOR METHODS ---
     @Override
     public void visit(CompilationUnit cu, Object arg) {
         super.visit(cu, arg);
@@ -53,7 +51,6 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
 
     @Override
     public void visit(ClassOrInterfaceDeclaration cl, Object arg) {
-        // Visit children first to potentially parse nested classes if needed
         super.visit(cl, arg);
 
         if (cl.isInterface() || !(cl.isAnnotationPresent("Entity") || cl.isAnnotationPresent("MappedSuperclass") || cl.isAnnotationPresent("Embeddable"))) {
@@ -73,7 +70,6 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
                 case FIRST_PASS:
                     if (cl.isAnnotationPresent("MappedSuperclass")) {
                         MappedSuperclassInfo superclassInfo = parseMappedSuperclass(cl);
-                        // Check for null just in case parse fails unexpectedly
                         if (superclassInfo != null) {
                             mappedSuperclasses.put(className, superclassInfo);
                             log.debug("Parsed MappedSuperclass: {}", className);
@@ -106,7 +102,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         }
     }
 
-    // --- PARSING LOGIC ---
+    // --- Parsing Logic ---
 
     private MappedSuperclassInfo parseMappedSuperclass(ClassOrInterfaceDeclaration cl) {
         String className = cl.getFullyQualifiedName().orElse(cl.getNameAsString());
@@ -114,14 +110,13 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         MappedSuperclassInfo info = new MappedSuperclassInfo();
         info.setJavaClassName(className);
 
-        // Add fields declared directly BEFORE handling inheritance
+        // Handle PARENT MappedSuperclass fields FIRST (recursively)
+        addInheritedMappedSuperclassFields(cl, info);
+
+        // Then add fields declared DIRECTLY in this class
         for (FieldDeclaration field : cl.getFields()) {
             parseField(field, info.getColumns(), info.getRelationships(), null, info, false, false);
         }
-
-        // Recursively add fields from PARENT MappedSuperclass
-        addInheritedMappedSuperclassFields(cl, info); // Populate based on parents first
-
         return info;
     }
 
@@ -146,7 +141,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         info.setTableName(extractAnnotationAttribute(cl.getAnnotationByName("Table").orElse(null), "name")
                 .orElse(toSnakeCase(cl.getNameAsString())));
 
-        // Handle inheritance from MappedSuperclass
+        // Handle inheritance from MappedSuperclass (add inherited members FIRST)
         cl.getExtendedTypes().stream()
                 .findFirst()
                 .ifPresent(extendedType -> {
@@ -157,15 +152,13 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
                             if (mappedSuperclasses.containsKey(superClassName)) {
                                 log.trace("Entity {} extends MappedSuperclass {}", className, superClassName);
                                 info.setMappedSuperclass(superClassName);
-                                addInheritedMembers(info, superClassName, cl); // Add inherited members first
+                                addInheritedMembers(info, superClassName, cl);
                             } else {
                                 log.trace("Entity {} extends {} which is not a known MappedSuperclass", className, superClassName);
                             }
                         }
-                    } catch (UnsolvedSymbolException e) {
-                        log.warn("Could not resolve superclass symbol {} for Entity {}", extendedType.getNameAsString(), className);
-                    } catch (Exception e) {
-                        log.warn("Error resolving superclass {} for Entity {}", extendedType.getNameAsString(), className, e);
+                    } catch (Exception e) { // Catch broad exceptions during resolution
+                        log.warn("Could not resolve or process superclass {} for Entity {}: {}", extendedType.getNameAsString(), className, e.getMessage());
                     }
                 });
 
@@ -178,42 +171,111 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         return info;
     }
 
+    // Recursive helper for MappedSuperclass inheritance
+    private void addInheritedMappedSuperclassFields(ClassOrInterfaceDeclaration cl, MappedSuperclassInfo currentInfo) {
+        cl.getExtendedTypes().stream()
+                .findFirst()
+                .ifPresent(extendedType -> {
+                    try {
+                        ResolvedType resolved = extendedType.resolve();
+                        if (resolved.isReferenceType()) {
+                            String superClassName = resolved.asReferenceType().getQualifiedName();
+                            MappedSuperclassInfo parentInfo = mappedSuperclasses.get(superClassName);
+
+                            // If parent is also a MappedSuperclass (found in our map)
+                            if (parentInfo != null) {
+                                log.trace("Adding inherited fields from {} to {}", superClassName, currentInfo.getJavaClassName());
+                                // Recursively add grandparent fields first
+                                // *** FIX: Convert resolved type back to AST node for recursion ***
+                                Optional<Node> parentNodeOpt = resolved.asReferenceType().getTypeDeclaration()
+                                        .filter(ResolvedReferenceTypeDeclaration::isClass)
+                                        .flatMap(td -> td.asClass().toAst());
+
+                                if (parentNodeOpt.isPresent() && parentNodeOpt.get() instanceof ClassOrInterfaceDeclaration parentCl) {
+                                    addInheritedMappedSuperclassFields(parentCl, currentInfo); // Recursive call
+                                } else {
+                                    log.warn("Could not get AST for parent MappedSuperclass {} to continue recursive inheritance", superClassName);
+                                }
+
+                                // Then add fields from this direct parent
+                                parentInfo.getColumns().forEach(col -> addIfNotPresent(currentInfo.getColumns(), deepCopyColumnInfo(col), true, superClassName));
+                                parentInfo.getRelationships().forEach(rel -> addIfNotPresent(currentInfo.getRelationships(), deepCopyRelationshipInfo(rel), true, superClassName));
+                            } else {
+                                log.trace("Parent class {} of MappedSuperclass {} is not itself a known MappedSuperclass", superClassName, currentInfo.getJavaClassName());
+                            }
+                        }
+                    } catch (Exception e) {
+                        log.warn("Error resolving or processing superclass {} for {}: {}", extendedType.getNameAsString(), currentInfo.getJavaClassName(), e.getMessage());
+                    }
+                });
+    }
+
+    // Adds members from MappedSuperclass to Entity, handling overrides
+    private void addInheritedMembers(EntityInfo entityInfo, String superClassName, ClassOrInterfaceDeclaration entityClassDecl) {
+        MappedSuperclassInfo parentInfo = mappedSuperclasses.get(superClassName);
+        if (parentInfo == null) {
+            log.warn("!!! MappedSuperclassInfo not found in cache for {} when processing entity {}", superClassName, entityInfo.getJavaClassName());
+            return;
+        }
+        log.trace("Processing inherited members from {} for entity {}", superClassName, entityInfo.getJavaClassName()); // <-- ADD LOG
+
+        Map<String, String> columnOverrides = getAttributeOverrides(entityClassDecl.getAnnotationByName("AttributeOverrides").orElse(null));
+
+        parentInfo.getColumns().forEach(col -> {
+            ColumnInfo inheritedCol = deepCopyColumnInfo(col);
+            log.trace("... considering inherited column: {}", inheritedCol.getFieldName()); // <-- ADD LOG
+            String overrideKey = inheritedCol.getFieldName();
+            if (columnOverrides.containsKey(overrideKey)) {
+                inheritedCol.setColumnName(columnOverrides.get(overrideKey));
+                inheritedCol.setNullable(isOverriddenNullable(entityClassDecl.getAnnotationByName("AttributeOverrides").orElse(null), overrideKey));
+                log.trace("... applied inherited @AttributeOverride for field '{}': -> '{}', nullable: {}", overrideKey, inheritedCol.getColumnName(), inheritedCol.getNullable()); // <-- ADD LOG
+            }
+            addIfNotPresent(entityInfo.getColumns(), inheritedCol, true, superClassName);
+        });
+
+        parentInfo.getRelationships().forEach(rel -> {
+            RelationshipInfo inheritedRel = deepCopyRelationshipInfo(rel);
+            log.trace("... considering inherited relationship: {}", inheritedRel.getFieldName()); // <-- ADD LOG
+            // TODO: Apply @AssociationOverrides if needed
+            addIfNotPresent(entityInfo.getRelationships(), inheritedRel, true, superClassName);
+        });
+    }
+
+
     // --- Field Parsing Logic ---
     private void parseField(FieldDeclaration field, List<ColumnInfo> columns, List<RelationshipInfo> relationships,
                             EntityInfo entityContext, MappedSuperclassInfo superclassContext,
-                            boolean isEmbeddedAttribute, boolean inheritedFromMappedSuperclass) { // Added boolean flags
+                            boolean isEmbeddedAttribute, boolean inheritedFromMappedSuperclass) { // Renamed flag for clarity
 
         if (field.isStatic() || field.isTransient() || field.isAnnotationPresent("Transient")) {
             return;
         }
 
-        // Parameter 'isEmbeddedAttribute' is intentionally false here, it's set true when called from @Embedded logic below
-        // Parameter 'inheritedFromMappedSuperclass' is intentionally false, set true by callers processing inherited members
-
         field.getVariables().forEach(variable -> {
             String fieldName = variable.getNameAsString();
-            String fieldTypeName; // No initializer needed
+            String fieldTypeName = "UNKNOWN";
             ResolvedType resolvedType = null;
             try {
                 resolvedType = variable.getType().resolve();
                 fieldTypeName = getResolvedTypeName(resolvedType);
-            } catch (Exception e) { // Catch broader exceptions during resolution
+            } catch (Exception e) {
                 log.warn("Could not resolve type for field '{}' (using AST type '{}'): {}", fieldName, variable.getTypeAsString(), e.getMessage());
                 fieldTypeName = variable.getTypeAsString();
             }
 
             log.trace("Parsing field: {} {}, Inherited: {}, EmbeddedAttr: {}", fieldTypeName, fieldName, inheritedFromMappedSuperclass, isEmbeddedAttribute);
 
-            if (isRelationship(field)) { // Call static helper
+            if (isRelationship(field)) {
                 if (relationships != null) {
                     RelationshipInfo relInfo = parseRelationship(field, fieldName, fieldTypeName, resolvedType);
                     if (relInfo != null) {
+                        // Pass the inheritance flag correctly
                         addIfNotPresent(relationships, relInfo, inheritedFromMappedSuperclass, superclassContext != null ? superclassContext.getJavaClassName() : null);
                     }
                 }
             }
             else if (field.isAnnotationPresent("Embedded") || field.isAnnotationPresent("EmbeddedId")) {
-                if (columns != null && (entityContext != null || superclassContext != null) ) { // Can be embedded in entity or mapped superclass
+                if (columns != null && (entityContext != null || superclassContext != null)) {
                     EmbeddableInfo embeddedDef = findEmbeddableDefinition(fieldTypeName);
                     if (embeddedDef != null) {
                         String currentClassName = entityContext != null ? entityContext.getJavaClassName() : (superclassContext != null ? superclassContext.getJavaClassName() : "UNKNOWN");
@@ -222,27 +284,29 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
 
                         embeddedDef.getFields().forEach(embeddableColTmpl -> {
                             ColumnInfo col = deepCopyColumnInfo(embeddableColTmpl);
-                            // Set embedded flags correctly
                             col.setIsEmbeddedAttribute(true);
                             col.setEmbeddedFromFieldName(fieldName);
                             col.setOriginalEmbeddableFieldName(embeddableColTmpl.getFieldName());
-                            col.setInherited(inheritedFromMappedSuperclass); // The @Embedded field itself might be inherited
+                            // Set inheritance based on whether the @Embedded field itself was inherited
+                            col.setInherited(inheritedFromMappedSuperclass);
                             if (inheritedFromMappedSuperclass && superclassContext != null) col.setInheritedFromClass(superclassContext.getJavaClassName());
 
                             String overrideKey = embeddableColTmpl.getFieldName();
                             if (overrides.containsKey(overrideKey)) {
                                 col.setColumnName(overrides.get(overrideKey));
                                 col.setNullable(isOverriddenNullable(field.getAnnotationByName("AttributeOverrides").orElse(null), overrideKey));
-                                log.trace("Applied @AttributeOverride for embedded field '{}' ({}): name='{}', nullable={}", fieldName, overrideKey, col.getColumnName(), col.getNullable());
+                                log.trace("Applied @AttributeOverride for embedded field '{}' ({}): name='{}', nullable={}",
+                                        fieldName, overrideKey, col.getColumnName(), col.getNullable());
                             } else {
                                 col.setColumnName(toSnakeCase(fieldName) + "_" + col.getColumnName());
                                 col.setNullable(embeddableColTmpl.getNullable());
                             }
                             if (field.isAnnotationPresent("EmbeddedId")){
                                 col.setPrimaryKey(true);
-                                col.setNullable(false); // Part of PK -> not nullable
+                                col.setNullable(false);
                             }
-                            addIfNotPresent(columns, col); // Add column (will handle inheritance flag internally if needed)
+                            // Pass inheritance flag when adding
+                            addIfNotPresent(columns, col, inheritedFromMappedSuperclass, col.getInheritedFromClass());
                         });
                     } else {
                         String currentClassName = entityContext != null ? entityContext.getJavaClassName() : (superclassContext != null ? superclassContext.getJavaClassName() : "UNKNOWN");
@@ -253,7 +317,6 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
             else { // Basic Column
                 if (columns != null) {
                     ColumnInfo colInfo = parseBasicColumn(field, fieldName, fieldTypeName, resolvedType);
-                    // parseBasicColumn handles annotations, null checks are not redundant here
                     if (colInfo != null) {
                         addIfNotPresent(columns, colInfo, inheritedFromMappedSuperclass, superclassContext != null ? superclassContext.getJavaClassName() : null);
                     }
@@ -263,24 +326,21 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
     }
 
 
-    // ... (Keep parseBasicColumn and parseRelationship methods as before, but ensure helpers called are static)
-
     private ColumnInfo parseBasicColumn(FieldDeclaration field, String fieldName, String fieldType, ResolvedType resolvedType) {
         ColumnInfo col = new ColumnInfo();
         col.setFieldName(fieldName);
         col.setJavaType(fieldType);
-        col.setSqlType(guessSqlType(fieldType)); // Static call
+        col.setSqlType(guessSqlType(fieldType));
 
-        // --- Process Annotations ---
         field.getAnnotationByName("Id").ifPresent(ann -> col.setPrimaryKey(true));
 
         field.getAnnotationByName("GeneratedValue").ifPresent(ann -> {
-            extractAnnotationAttribute(ann, "strategy") // Static call
+            extractAnnotationAttribute(ann, "strategy")
                     .ifPresent(strategy -> col.setGenerationStrategy(strategy.replace("GenerationType.", "")));
         });
 
         field.getAnnotationByName("Column").ifPresent(ann -> {
-            extractAnnotationAttribute(ann, "name").ifPresent(col::setColumnName); // Static call
+            extractAnnotationAttribute(ann, "name").ifPresent(col::setColumnName);
             extractAnnotationAttribute(ann, "nullable").map(Boolean::parseBoolean).ifPresent(col::setNullable);
             extractAnnotationAttribute(ann, "unique").map(Boolean::parseBoolean).ifPresent(col::setUnique);
             extractAnnotationAttribute(ann, "length").map(Integer::parseInt).ifPresent(col::setLength);
@@ -288,24 +348,21 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
             extractAnnotationAttribute(ann, "scale").map(Integer::parseInt).ifPresent(col::setScale);
         });
 
-        // Default column name
         if (col.getColumnName() == null) {
-            col.setColumnName(toSnakeCase(fieldName)); // Static call
+            col.setColumnName(toSnakeCase(fieldName));
         }
-        // Default nullable
         if (col.getNullable() == null) {
-            col.setNullable(!col.isPrimaryKey()); // PKs not nullable, others are by default
+            col.setNullable(!col.isPrimaryKey());
         }
-        // Default unique
         if (col.getUnique() == null) {
-            col.setUnique(col.isPrimaryKey()); // PKs are unique
+            col.setUnique(col.isPrimaryKey());
         }
 
 
         field.getAnnotationByName("Enumerated").ifPresent(ann -> {
             col.setIsEnum(true);
             EnumInfo enumInfo = new EnumInfo();
-            String storage = extractAnnotationAttribute(ann, null) // Static call
+            String storage = extractAnnotationAttribute(ann, null)
                     .orElse("ORDINAL");
             enumInfo.setStorageType(storage.replace("EnumType.", ""));
             col.setSqlType("STRING".equals(enumInfo.getStorageType()) ? "VARCHAR" : "INTEGER");
@@ -324,7 +381,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
                     log.warn("Could not resolve enum constants for type {}: {}", fieldType, e.getMessage());
                 }
             }
-            if(enumInfo.getPossibleValues() == null) enumInfo.setPossibleValues(new ArrayList<>()); // Initialize
+            if(enumInfo.getPossibleValues() == null) enumInfo.setPossibleValues(new ArrayList<>());
 
             col.setEnumInfo(enumInfo);
         });
@@ -341,38 +398,19 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
 
         if (resolvedFieldType != null && resolvedFieldType.isReferenceType()) {
             String qualifiedName = resolvedFieldType.asReferenceType().getQualifiedName();
-            if (qualifiedName.equals("java.util.List") || qualifiedName.equals("java.util.Set") || qualifiedName.equals("java.util.Collection")) {
+            if (qualifiedName.equals("java.util.List") || qualifiedName.equals("java.util.Set") || qualifiedName.equals("java.util.Collection") || qualifiedName.equals("java.lang.Iterable")) {
                 isCollection = true;
-                targetEntityType = getGenericTypeArgument(field, resolvedFieldType); // Static call
+                targetEntityType = getGenericTypeArgument(field, resolvedFieldType);
             }
         }
 
-        if (field.isAnnotationPresent("OneToOne")) {
-            rel.setType("OneToOne");
-            field.getAnnotationByName("OneToOne").ifPresent(ann -> parseCommonRelationshipAttributes(rel, ann));
-        } else if (field.isAnnotationPresent("OneToMany")) {
-            rel.setType("OneToMany");
-            if(!isCollection) log.warn("@OneToMany used on non-collection field '{}' type '{}'", fieldName, fieldType);
-            rel.setOwningSide(false);
-            field.getAnnotationByName("OneToMany").ifPresent(ann -> parseCommonRelationshipAttributes(rel, ann));
-        } else if (field.isAnnotationPresent("ManyToOne")) {
-            rel.setType("ManyToOne");
-            if(isCollection) log.warn("@ManyToOne used on collection field '{}' type '{}'", fieldName, fieldType);
-            rel.setOwningSide(true);
-            field.getAnnotationByName("ManyToOne").ifPresent(ann -> parseCommonRelationshipAttributes(rel, ann));
-        } else if (field.isAnnotationPresent("ManyToMany")) {
-            rel.setType("ManyToMany");
-            if(!isCollection) log.warn("@ManyToMany used on non-collection field '{}' type '{}'", fieldName, fieldType);
-            field.getAnnotationByName("ManyToMany").ifPresent(ann -> {
-                parseCommonRelationshipAttributes(rel, ann);
-                if (rel.getMappedBy() != null) rel.setOwningSide(false);
-                else rel.setOwningSide(true);
-            });
-        } else {
-            return null;
-        }
+        if (field.isAnnotationPresent("OneToOne")) { rel.setType("OneToOne"); field.getAnnotationByName("OneToOne").ifPresent(ann -> parseCommonRelationshipAttributes(rel, ann));}
+        else if (field.isAnnotationPresent("OneToMany")) { rel.setType("OneToMany"); if(!isCollection) log.warn("@OneToMany used on non-collection field '{}'?", fieldName); rel.setOwningSide(false); field.getAnnotationByName("OneToMany").ifPresent(ann -> parseCommonRelationshipAttributes(rel, ann));}
+        else if (field.isAnnotationPresent("ManyToOne")) { rel.setType("ManyToOne"); if(isCollection) log.warn("@ManyToOne used on collection field '{}'?", fieldName); rel.setOwningSide(true); field.getAnnotationByName("ManyToOne").ifPresent(ann -> parseCommonRelationshipAttributes(rel, ann));}
+        else if (field.isAnnotationPresent("ManyToMany")) { rel.setType("ManyToMany"); if(!isCollection) log.warn("@ManyToMany used on non-collection field '{}'?", fieldName); field.getAnnotationByName("ManyToMany").ifPresent(ann -> { parseCommonRelationshipAttributes(rel, ann); if (rel.getMappedBy() != null) rel.setOwningSide(false); else rel.setOwningSide(true); });}
+        else { return null; }
 
-        if (targetEntityType == null || targetEntityType.equals("UNKNOWN") || targetEntityType.equals("java.lang.Object")) {
+        if (targetEntityType == null || targetEntityType.equals("UNKNOWN") || targetEntityType.equals("java.lang.Object") || targetEntityType.equals("ERROR_RESOLVING_TYPE")) {
             log.warn("Could not determine target entity type for relationship field: {}. Annotation: {}", fieldName, rel.getType());
             return null;
         }
@@ -382,13 +420,13 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
             extractAnnotationAttribute(ann, "name").ifPresent(rel::setJoinColumnName);
         });
         if (rel.isOwningSide() && rel.getJoinColumnName() == null && ("ManyToOne".equals(rel.getType()) || "OneToOne".equals(rel.getType()))) {
-            rel.setJoinColumnName(toSnakeCase(fieldName) + "_id"); // Static call
+            rel.setJoinColumnName(toSnakeCase(fieldName) + "_id");
         }
 
         field.getAnnotationByName("JoinTable").ifPresent(ann -> {
-            extractAnnotationAttribute(ann, "name").ifPresent(rel::setJoinTableName); // Static call
-            extractJoinColumnNameFromAnnotationExpr(ann, "joinColumns").ifPresent(rel::setJoinTableJoinColumnName); // Static call
-            extractJoinColumnNameFromAnnotationExpr(ann, "inverseJoinColumns").ifPresent(rel::setJoinTableInverseJoinColumnName); // Static call
+            extractAnnotationAttribute(ann, "name").ifPresent(rel::setJoinTableName);
+            extractJoinColumnNameFromAnnotationExpr(ann, "joinColumns").ifPresent(rel::setJoinTableJoinColumnName);
+            extractJoinColumnNameFromAnnotationExpr(ann, "inverseJoinColumns").ifPresent(rel::setJoinTableInverseJoinColumnName);
             if (rel.getMappedBy() == null && ("ManyToMany".equals(rel.getType()) || "OneToMany".equals(rel.getType()))){
                 rel.setOwningSide(true);
             }
@@ -397,56 +435,65 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         return rel;
     }
 
+
     // --- STATIC HELPER METHODS ---
 
-    private static boolean isRelationship(FieldDeclaration field) { // Made static
+    private static boolean isRelationship(FieldDeclaration field) {
         return field.isAnnotationPresent("OneToOne") ||
                 field.isAnnotationPresent("OneToMany") ||
                 field.isAnnotationPresent("ManyToOne") ||
                 field.isAnnotationPresent("ManyToMany");
     }
 
-    private static String getResolvedTypeName(ResolvedType resolvedType) { // Made static
-        // ... (implementation remains the same as previous correct version) ...
+    private static String getResolvedTypeName(ResolvedType resolvedType) {
         try {
             if (resolvedType.isReferenceType()) {
                 ResolvedReferenceType refType = resolvedType.asReferenceType();
                 if (refType.getQualifiedName().equals("java.util.Optional")) {
-                    List<ResolvedType> typeParams = refType.getTypeParametersMap().stream().map(p -> p.b).filter(Optional::isPresent).map(Optional::get).toList();
-                    if (typeParams.size() == 1) {
-                        return "Optional<" + getResolvedTypeName(typeParams.get(0)) + ">";
+                    // *** FIX: Use correct stream processing for Optional type parameter ***
+                    Optional<ResolvedType> typeParamOpt = refType.getTypeParametersMap().stream()
+                            .map(pair -> Optional.ofNullable(pair.b))
+                            .filter(Optional::isPresent)
+                            .map(Optional::get)
+                            .findFirst();
+                    if (typeParamOpt.isPresent()) {
+                        return "Optional<" + getResolvedTypeName(typeParamOpt.get()) + ">";
+                    } else {
+                        return "Optional<UNKNOWN>"; // Fallback if type parameter cannot be resolved
                     }
                 }
                 return refType.getQualifiedName();
             } else if (resolvedType.isPrimitive()) {
                 return resolvedType.asPrimitive().name().toLowerCase();
             } else if (resolvedType.isArray()) {
-                // Corrected byte[] check
                 if (resolvedType.asArrayType().getComponentType().isPrimitive() &&
-                        resolvedType.asArrayType().getComponentType().equals(ResolvedPrimitiveType.BYTE)) { // Correct check
+                        resolvedType.asArrayType().getComponentType().equals(ResolvedPrimitiveType.BYTE)) { // Use static field
                     return "byte[]";
                 }
                 return getResolvedTypeName(resolvedType.asArrayType().getComponentType()) + "[]";
+            } else if (resolvedType.isVoid()) { // Handle Void type
+                return ResolvedVoidType.INSTANCE.describe();
             }
             return resolvedType.describe();
         } catch (Exception e) {
-            log.warn("Error describing resolved type: {}", e.getMessage());
+            // Log exception details for better debugging
+            log.warn("Error describing resolved type '{}': {}", resolvedType.toString(), e.getMessage());
             return "ERROR_RESOLVING_TYPE";
         }
     }
 
-    private static String getGenericTypeArgument(FieldDeclaration field, ResolvedType resolvedFieldType) { // Made static
-        // ... (implementation remains the same as previous correct version) ...
+    private static String getGenericTypeArgument(FieldDeclaration field, ResolvedType resolvedFieldType) {
         try {
             if (resolvedFieldType != null && resolvedFieldType.isReferenceType()) {
                 ResolvedReferenceType refType = resolvedFieldType.asReferenceType();
-                List<ResolvedType> typeArgs = refType.getTypeParametersMap().stream()
-                        .map(pair -> pair.b)
-                        .filter(Optional::isPresent)
-                        .map(Optional::get)
-                        .toList();
-                if (!typeArgs.isEmpty()) {
-                    return getResolvedTypeName(typeArgs.get(0));
+                // *** FIX: Correct stream processing to get the first type argument ***
+                Optional<ResolvedType> typeArgOpt = refType.getTypeParametersMap().stream()
+                        .map(pair -> Optional.ofNullable(pair.b)) // Map to the Optional<ResolvedType>
+                        .filter(Optional::isPresent) // Filter out empty Optionals
+                        .map(Optional::get)      // Get the ResolvedType from Optional
+                        .findFirst();           // Get the first one
+                if (typeArgOpt.isPresent()) {
+                    return getResolvedTypeName(typeArgOpt.get());
                 } else {
                     log.warn("Could not find type arguments for generic type '{}' in field '{}'", refType.getQualifiedName(), field.getVariable(0).getNameAsString());
                 }
@@ -454,11 +501,10 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         } catch (Exception e) {
             log.warn("Error extracting generic type argument for field '{}'", field.getVariable(0).getNameAsString(), e);
         }
-        return "java.lang.Object"; // Fallback
+        return "java.lang.Object";
     }
 
-    private static Optional<String> extractAnnotationAttribute(AnnotationExpr annotationExpr, String attributeName) { // Made static
-        // ... (implementation remains the same as previous correct version) ...
+    private static Optional<String> extractAnnotationAttribute(AnnotationExpr annotationExpr, String attributeName) {
         if (annotationExpr == null) return Optional.empty();
         final String targetAttribute = (attributeName == null || attributeName.isEmpty()) ? "value" : attributeName;
         if (annotationExpr.isSingleMemberAnnotationExpr()) {
@@ -473,8 +519,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         return Optional.empty();
     }
 
-    private static Optional<List<String>> extractAnnotationAttributeList(AnnotationExpr annotationExpr, String attributeName) { // Made static
-        // ... (implementation remains the same as previous correct version) ...
+    private static Optional<List<String>> extractAnnotationAttributeList(AnnotationExpr annotationExpr, String attributeName) {
         if (annotationExpr == null || attributeName == null || !annotationExpr.isNormalAnnotationExpr()) {
             return Optional.empty();
         }
@@ -489,130 +534,90 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
                 List<String> values = new ArrayList<>();
                 valueExpr.asArrayInitializerExpr().getValues().forEach(valExpr -> {
                     String strVal = getStringValue(valExpr);
-                    if (strVal != null) {
-                        values.add(strVal.substring(strVal.lastIndexOf('.') + 1)); // Get simple name
-                    }
+                    if (strVal != null) { values.add(strVal.substring(strVal.lastIndexOf('.') + 1));}
                 });
                 return Optional.of(values).filter(l -> !l.isEmpty());
             } else {
                 String singleVal = getStringValue(valueExpr);
-                if(singleVal != null) {
-                    return Optional.of(List.of(singleVal.substring(singleVal.lastIndexOf('.') + 1)));
-                }
+                if(singleVal != null) { return Optional.of(List.of(singleVal.substring(singleVal.lastIndexOf('.') + 1)));}
             }
         }
         return Optional.empty();
     }
 
-    private static String getStringValue(Expression expr) { // Made static
-        // ... (implementation mostly same, corrected typo) ...
+    private static String getStringValue(Expression expr) {
         if (expr == null) return null;
-        if (expr.isStringLiteralExpr()) {
-            return expr.asStringLiteralExpr().getValue();
-        } else if (expr.isNameExpr() || expr.isFieldAccessExpr()) { // Corrected typo here isFieldAccessExpr()
-            return expr.toString();
-        } else if (expr.isIntegerLiteralExpr()) {
-            return expr.asIntegerLiteralExpr().getValue();
-        } else if (expr.isBooleanLiteralExpr()) {
-            return String.valueOf(expr.asBooleanLiteralExpr().getValue());
-        } else if (expr.isLongLiteralExpr()) {
-            return expr.asLongLiteralExpr().getValue();
-        } else if (expr.isDoubleLiteralExpr()) {
-            return expr.asDoubleLiteralExpr().getValue();
-        } else if (expr.isAnnotationExpr()) {
-            return expr.toString();
-        }
+        if (expr.isStringLiteralExpr()) { return expr.asStringLiteralExpr().getValue(); }
+        else if (expr.isNameExpr() || expr.isFieldAccessExpr()) { return expr.toString();} // Keep this for enums like EnumType.STRING
+        else if (expr.isIntegerLiteralExpr()) { return expr.asIntegerLiteralExpr().getValue();}
+        else if (expr.isBooleanLiteralExpr()) { return String.valueOf(expr.asBooleanLiteralExpr().getValue());}
+        else if (expr.isLongLiteralExpr()) { return expr.asLongLiteralExpr().getValue();}
+        else if (expr.isDoubleLiteralExpr()) { return expr.asDoubleLiteralExpr().getValue();}
+        else if (expr.isAnnotationExpr()) { return expr.toString();}
         log.trace("Could not extract simple string value from expression: {} (Type: {})", expr, expr.getClass().getSimpleName());
         return null;
     }
 
-    private static String toSnakeCase(String camelCase) { // Made static
-        // ... (implementation remains the same) ...
+    private static String toSnakeCase(String camelCase) {
         if (camelCase == null || camelCase.isEmpty()) return "";
         return camelCase.replaceAll("([A-Z]+)([A-Z][a-z])", "$1_$2")
                 .replaceAll("([a-z\\d])([A-Z])", "$1_$2")
                 .toLowerCase();
     }
 
-    private static Map<String, String> createJavaToSqlTypeMap() { // Made static
-        // ... (implementation remains the same) ...
+    private static Map<String, String> createJavaToSqlTypeMap() {
         Map<String, String> map = new HashMap<>();
-        map.put("String", "VARCHAR");
-        map.put("Long", "BIGINT");
-        map.put("long", "BIGINT");
-        map.put("Integer", "INTEGER");
-        map.put("int", "INTEGER");
-        map.put("Short", "SMALLINT");
-        map.put("short", "SMALLINT");
-        map.put("Double", "DOUBLE PRECISION");
-        map.put("double", "DOUBLE PRECISION");
-        map.put("Float", "REAL");
-        map.put("float", "REAL");
-        map.put("Boolean", "BOOLEAN");
-        map.put("boolean", "BOOLEAN");
-        map.put("LocalDate", "DATE");
-        map.put("LocalDateTime", "TIMESTAMP");
-        map.put("ZonedDateTime", "TIMESTAMP WITH TIME ZONE");
-        map.put("OffsetDateTime", "TIMESTAMP WITH TIME ZONE");
-        map.put("Instant", "TIMESTAMP WITH TIME ZONE");
-        map.put("Date", "TIMESTAMP");
-        map.put("Timestamp", "TIMESTAMP");
-        map.put("Time", "TIME");
-        map.put("BigDecimal", "NUMERIC");
-        map.put("BigInteger", "NUMERIC");
-        map.put("byte[]", "BYTEA");
-        map.put("Byte[]", "BYTEA");
-        map.put("UUID", "UUID");
-        map.put("Character", "CHAR(1)");
-        map.put("char", "CHAR(1)");
+        map.put("String", "VARCHAR"); map.put("Long", "BIGINT"); map.put("long", "BIGINT");
+        map.put("Integer", "INTEGER"); map.put("int", "INTEGER"); map.put("Short", "SMALLINT");
+        map.put("short", "SMALLINT"); map.put("Double", "DOUBLE PRECISION"); map.put("double", "DOUBLE PRECISION");
+        map.put("Float", "REAL"); map.put("float", "REAL"); map.put("Boolean", "BOOLEAN");
+        map.put("boolean", "BOOLEAN"); map.put("LocalDate", "DATE"); map.put("LocalDateTime", "TIMESTAMP");
+        map.put("ZonedDateTime", "TIMESTAMP WITH TIME ZONE"); map.put("OffsetDateTime", "TIMESTAMP WITH TIME ZONE");
+        map.put("Instant", "TIMESTAMP WITH TIME ZONE"); map.put("Date", "TIMESTAMP"); map.put("Timestamp", "TIMESTAMP");
+        map.put("Time", "TIME"); map.put("BigDecimal", "NUMERIC"); map.put("BigInteger", "NUMERIC");
+        map.put("byte[]", "BYTEA"); map.put("Byte[]", "BYTEA"); map.put("UUID", "UUID");
+        map.put("Character", "CHAR(1)"); map.put("char", "CHAR(1)");
+        // Add Optional wrapper handling implicitly in guessSqlType
         return Collections.unmodifiableMap(map);
     }
 
-    private static String guessSqlType(String javaType) { // Made static
-        // ... (implementation remains the same) ...
-        String simpleJavaType = javaType.substring(javaType.lastIndexOf('.') + 1);
+    private static String guessSqlType(String javaType) {
+        String simpleJavaType = javaType;
+        if(javaType.contains(".")) {
+            simpleJavaType = javaType.substring(javaType.lastIndexOf('.') + 1);
+        }
+        // Handle Optional<Type>
         if (simpleJavaType.startsWith("Optional<") && simpleJavaType.endsWith(">")) {
             String innerType = simpleJavaType.substring(9, simpleJavaType.length() - 1);
-            return guessSqlType(innerType);
+            // Need to handle potential fully qualified inner types here if necessary
+            String simpleInnerType = innerType.substring(innerType.lastIndexOf('.') + 1);
+            return JAVA_TO_SQL_TYPE_MAP.getOrDefault(simpleInnerType, "VARCHAR"); // Guess based on inner type
         }
         return JAVA_TO_SQL_TYPE_MAP.getOrDefault(simpleJavaType, "VARCHAR");
     }
 
-    // --- Helper Methods specific to this visitor ---
-    private EmbeddableInfo findEmbeddableDefinition(String qualifiedClassName) {
-        return embeddables.stream() // Search in the list passed during construction
-                .filter(e -> qualifiedClassName.equals(e.getJavaClassName()))
-                .findFirst()
-                .orElse(null);
-    }
 
-    private void parseCommonRelationshipAttributes(RelationshipInfo rel, AnnotationExpr ann) { // Instance method ok
-        extractAnnotationAttribute(ann, "mappedBy").ifPresent(rel::setMappedBy); // Static call ok
-        extractAnnotationAttribute(ann, "fetch").ifPresentOrElse( // Static call ok
+    // --- Instance Helper Methods (Used within visitor logic) ---
+    private void parseCommonRelationshipAttributes(RelationshipInfo rel, AnnotationExpr ann) {
+        extractAnnotationAttribute(ann, "mappedBy").ifPresent(rel::setMappedBy);
+        extractAnnotationAttribute(ann, "fetch").ifPresentOrElse(
                 val -> rel.setFetchType(val.replace("FetchType.", "")),
-                () -> { /* Default set later based on type */ }
+                () -> { /* Default set later */ }
         );
-        extractAnnotationAttributeList(ann, "cascade").ifPresent(rel::setCascadeTypes); // Static call ok
-
-        // Set default FetchType AFTER checking annotation
+        extractAnnotationAttributeList(ann, "cascade").ifPresent(rel::setCascadeTypes);
         if (rel.getFetchType() == null) {
-            if ("ManyToOne".equals(rel.getType()) || "OneToOne".equals(rel.getType())) {
-                rel.setFetchType("EAGER");
-            } else {
-                rel.setFetchType("LAZY");
-            }
+            if ("ManyToOne".equals(rel.getType()) || "OneToOne".equals(rel.getType())) { rel.setFetchType("EAGER"); }
+            else { rel.setFetchType("LAZY"); }
         }
     }
 
     private static Optional<String> extractJoinColumnNameFromAnnotationExpr(AnnotationExpr parentAnn, String attributeName) { // Made static
-        // ... (implementation remains the same) ...
         return extractAnnotationAttribute(parentAnn, attributeName)
                 .flatMap(annString -> {
                     if (annString.startsWith("{") && annString.endsWith("}")) {
                         String content = annString.substring(1, annString.length() - 1).trim();
-                        if (content.startsWith("@JoinColumn")) {
-                            annString = content.split(",")[0].trim();
-                        } else { return Optional.empty();}
+                        if (content.startsWith("@JoinColumn")) { annString = content.split(",")[0].trim(); }
+                        else { return Optional.empty();}
                     }
                     if (annString.startsWith("@JoinColumn")) {
                         try {
@@ -621,15 +626,13 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
                         } catch (Exception e) {
                             log.warn("Failed to parse @JoinColumn string: {}", annString, e);
                             int nameIndex = annString.indexOf("name");
-                            if (nameIndex > 0) { /* ... basic parsing ... */
+                            if (nameIndex > 0) {
                                 int equalsIndex = annString.indexOf('=', nameIndex);
                                 int endIndex = annString.indexOf(',', equalsIndex);
                                 if (endIndex == -1) endIndex = annString.indexOf(')', equalsIndex);
                                 if (equalsIndex > 0 && endIndex > equalsIndex) {
                                     String nameVal = annString.substring(equalsIndex + 1, endIndex).trim();
-                                    if (nameVal.startsWith("\"") && nameVal.endsWith("\"")) {
-                                        nameVal = nameVal.substring(1, nameVal.length() - 1);
-                                    }
+                                    if (nameVal.startsWith("\"") && nameVal.endsWith("\"")) { nameVal = nameVal.substring(1, nameVal.length() - 1); }
                                     return Optional.of(nameVal);
                                 }
                             } return Optional.empty();
@@ -639,151 +642,69 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
     }
 
     private static Map<String, String> getAttributeOverrides(AnnotationExpr overridesAnnotation) { // Made static
-        // ... (implementation remains the same) ...
         Map<String, String> overrides = new HashMap<>();
         if (overridesAnnotation == null || !overridesAnnotation.isAnnotationExpr()) return overrides;
         Expression valueExpr = null;
-        if (overridesAnnotation.isNormalAnnotationExpr()) {
-            valueExpr = overridesAnnotation.asNormalAnnotationExpr().getPairs().stream()
-                    .filter(p -> "value".equals(p.getNameAsString())).findFirst().map(MemberValuePair::getValue).orElse(null);
-        } else if (overridesAnnotation.isSingleMemberAnnotationExpr()){
-            valueExpr = overridesAnnotation.asSingleMemberAnnotationExpr().getMemberValue();
-        } else { return overrides; }
-        if (valueExpr != null && valueExpr.isArrayInitializerExpr()) {
+        if (overridesAnnotation.isNormalAnnotationExpr()) { valueExpr = overridesAnnotation.asNormalAnnotationExpr().getPairs().stream().filter(p -> "value".equals(p.getNameAsString())).findFirst().map(MemberValuePair::getValue).orElse(null); }
+        else if (overridesAnnotation.isSingleMemberAnnotationExpr()){ valueExpr = overridesAnnotation.asSingleMemberAnnotationExpr().getMemberValue(); }
+        else { return overrides; }
+        if (valueExpr != null && valueExpr.isArrayInitializerExpr()) { /* ... parse array ... */
             valueExpr.asArrayInitializerExpr().getValues().forEach(overrideNode -> {
                 if (overrideNode instanceof AnnotationExpr overrideAnn && overrideAnn.getNameAsString().equals("AttributeOverride")) {
                     Optional<String> nameOpt = extractAnnotationAttribute(overrideAnn, "name");
-                    Optional<String> columnOpt = extractAnnotationAttribute(overrideAnn, "column")
-                            .flatMap(colAnnStr -> {
-                                try { return extractAnnotationAttribute(StaticJavaParser.parseAnnotation(colAnnStr), "name");}
-                                catch (Exception e) { log.warn("Failed to parse @Column string in @AttributeOverride: {}", colAnnStr); return Optional.empty();}
-                            });
-                    if (nameOpt.isPresent() && columnOpt.isPresent()) { overrides.put(nameOpt.get(), columnOpt.get());}
+                    Optional<String> columnOpt = extractAnnotationAttribute(overrideAnn, "column").flatMap(colAnnStr -> { try { return extractAnnotationAttribute(StaticJavaParser.parseAnnotation(colAnnStr), "name"); } catch (Exception e) { return Optional.empty(); }});
+                    if (nameOpt.isPresent() && columnOpt.isPresent()) { overrides.put(nameOpt.get(), columnOpt.get()); }
                 }
             });
-        } else if (valueExpr instanceof AnnotationExpr overrideAnn && overrideAnn.getNameAsString().equals("AttributeOverride")){
+        } else if (valueExpr instanceof AnnotationExpr overrideAnn && overrideAnn.getNameAsString().equals("AttributeOverride")){ /* ... parse single ... */
             Optional<String> nameOpt = extractAnnotationAttribute(overrideAnn, "name");
-            Optional<String> columnOpt = extractAnnotationAttribute(overrideAnn, "column")
-                    .flatMap(colAnnStr -> {
-                        try { return extractAnnotationAttribute(StaticJavaParser.parseAnnotation(colAnnStr), "name");}
-                        catch (Exception e) { log.warn("Failed to parse @Column string in @AttributeOverride: {}", colAnnStr); return Optional.empty();}
-                    });
-            if (nameOpt.isPresent() && columnOpt.isPresent()) { overrides.put(nameOpt.get(), columnOpt.get());}
+            Optional<String> columnOpt = extractAnnotationAttribute(overrideAnn, "column").flatMap(colAnnStr -> { try { return extractAnnotationAttribute(StaticJavaParser.parseAnnotation(colAnnStr), "name"); } catch (Exception e) { return Optional.empty(); }});
+            if (nameOpt.isPresent() && columnOpt.isPresent()) { overrides.put(nameOpt.get(), columnOpt.get()); }
         } return overrides;
     }
 
     private static Boolean isOverriddenNullable(AnnotationExpr overridesAnnotation, String fieldName) { // Made static
-        // ... (implementation remains the same) ...
         if (overridesAnnotation == null || !overridesAnnotation.isAnnotationExpr()) return null;
         Expression valueExpr = null;
-        if(overridesAnnotation.isNormalAnnotationExpr()) { /* ... get value expression ... */}
-        else if (overridesAnnotation.isSingleMemberAnnotationExpr()){ /* ... get value expression ... */}
+        if(overridesAnnotation.isNormalAnnotationExpr()) { valueExpr = overridesAnnotation.asNormalAnnotationExpr().getPairs().stream().filter(p -> "value".equals(p.getNameAsString())).findFirst().map(MemberValuePair::getValue).orElse(null); }
+        else if (overridesAnnotation.isSingleMemberAnnotationExpr()){ valueExpr = overridesAnnotation.asSingleMemberAnnotationExpr().getMemberValue(); }
         else { return null; }
-
         if (valueExpr != null && valueExpr.isArrayInitializerExpr()) {
-            for(Node overrideNode : valueExpr.asArrayInitializerExpr().getValues()){ /* ... find override, parse nullable ... */ }
-        } else if (valueExpr instanceof AnnotationExpr overrideAnn && overrideAnn.getNameAsString().equals("AttributeOverride")){ /* ... parse nullable ... */}
-        return null; // Default if not found
-    }
-
-    private void addInheritedMembers(EntityInfo entityInfo, String superClassName, ClassOrInterfaceDeclaration entityClassDecl) { // Instance method ok
-        // ... (implementation remains the same) ...
-        MappedSuperclassInfo parentInfo = mappedSuperclasses.get(superClassName);
-        if (parentInfo == null) return;
-        Map<String, String> columnOverrides = getAttributeOverrides(entityClassDecl.getAnnotationByName("AttributeOverrides").orElse(null)); // Static call ok
-        parentInfo.getColumns().forEach(col -> {
-            ColumnInfo inheritedCol = deepCopyColumnInfo(col); // Instance call ok
-            String overrideKey = inheritedCol.getFieldName();
-            if (columnOverrides.containsKey(overrideKey)) {
-                inheritedCol.setColumnName(columnOverrides.get(overrideKey));
-                log.trace("Applied inherited @AttributeOverride on {} for field '{}': -> '{}'", entityInfo.getJavaClassName(), overrideKey, inheritedCol.getColumnName());
-            }
-            addIfNotPresent(entityInfo.getColumns(), inheritedCol, true, superClassName); // Instance call ok
-        });
-        parentInfo.getRelationships().forEach(rel -> {
-            RelationshipInfo inheritedRel = deepCopyRelationshipInfo(rel); // Instance call ok
-            addIfNotPresent(entityInfo.getRelationships(), inheritedRel, true, superClassName); // Instance call ok
-        });
-    }
-
-    private void addInheritedMappedSuperclassFields(ClassOrInterfaceDeclaration cl, MappedSuperclassInfo currentInfo) { // Instance method ok
-        // ... (implementation remains the same) ...
-        cl.getExtendedTypes().stream()
-                .findFirst()
-                .ifPresent(extendedType -> {
-                    try {
-                        ResolvedType resolved = extendedType.resolve();
-                        if (resolved.isReferenceType()) {
-                            String superClassName = resolved.asReferenceType().getQualifiedName();
-                            // Try fetching from the map first
-                            MappedSuperclassInfo parentInfo = mappedSuperclasses.get(superClassName);
-                            if (parentInfo != null) {
-                                log.trace("Adding inherited fields from already parsed {} to {}", superClassName, currentInfo.getJavaClassName());
-                                // Resolve parent AST Node to continue recursion IF NEEDED (might not be needed if parents are always parsed first)
-                                resolved.asReferenceType().getTypeDeclaration()
-                                        .filter(ResolvedReferenceTypeDeclaration::isClass)
-                                        .flatMap(td -> td.asClass().toAst())
-                                        .ifPresent(parentCl -> addInheritedMappedSuperclassFields(parentCl, currentInfo)); // Recursive call needs instance method
-
-                                parentInfo.getColumns().forEach(col -> addIfNotPresent(currentInfo.getColumns(), deepCopyColumnInfo(col), true, superClassName));
-                                parentInfo.getRelationships().forEach(rel -> addIfNotPresent(currentInfo.getRelationships(), deepCopyRelationshipInfo(rel), true, superClassName));
-                            } else {
-                                log.trace("Parent MappedSuperclass {} not found in map for {}", superClassName, currentInfo.getJavaClassName());
-                            }
-                        }
-                    } catch (Exception e) {
-                        log.warn("Error resolving or processing superclass {} for {}", extendedType.getNameAsString(), currentInfo.getJavaClassName(), e);
+            for(Node overrideNode : valueExpr.asArrayInitializerExpr().getValues()){
+                if (overrideNode instanceof AnnotationExpr overrideAnn && overrideAnn.getNameAsString().equals("AttributeOverride")) {
+                    Optional<String> nameOpt = extractAnnotationAttribute(overrideAnn, "name");
+                    if(nameOpt.isPresent() && nameOpt.get().equals(fieldName)) {
+                        return extractAnnotationAttribute(overrideAnn, "column")
+                                .flatMap(colAnnStr -> { try { return extractAnnotationAttribute(StaticJavaParser.parseAnnotation(colAnnStr), "nullable");} catch (Exception e) { return Optional.empty();}})
+                                .map(Boolean::parseBoolean).orElse(null);
                     }
-                });
+                }
+            }
+        } else if (valueExpr instanceof AnnotationExpr overrideAnn && overrideAnn.getNameAsString().equals("AttributeOverride")){
+            Optional<String> nameOpt = extractAnnotationAttribute(overrideAnn, "name");
+            if(nameOpt.isPresent() && nameOpt.get().equals(fieldName)) {
+                return extractAnnotationAttribute(overrideAnn, "column")
+                        .flatMap(colAnnStr -> { try { return extractAnnotationAttribute(StaticJavaParser.parseAnnotation(colAnnStr), "nullable");} catch (Exception e) { return Optional.empty();}})
+                        .map(Boolean::parseBoolean).orElse(null);
+            }
+        } return null;
     }
 
-    // --- Deep Copy Helpers (Instance Methods OK) ---
+    private EmbeddableInfo findEmbeddableDefinition(String qualifiedClassName) { // Instance method ok
+        return embeddables.stream()
+                .filter(e -> qualifiedClassName.equals(e.getJavaClassName()))
+                .findFirst()
+                .orElse(null);
+    }
+
     private ColumnInfo deepCopyColumnInfo(ColumnInfo original) { // Instance method ok
-        // ... (implementation remains the same) ...
-        ColumnInfo copy = new ColumnInfo();
-        copy.setFieldName(original.getFieldName());
-        copy.setColumnName(original.getColumnName());
-        copy.setJavaType(original.getJavaType());
-        copy.setSqlType(original.getSqlType());
-        copy.setPrimaryKey(original.isPrimaryKey());
-        copy.setGenerationStrategy(original.getGenerationStrategy());
-        copy.setNullable(original.getNullable());
-        copy.setUnique(original.getUnique());
-        copy.setLength(original.getLength());
-        copy.setPrecision(original.getPrecision());
-        copy.setScale(original.getScale());
-        copy.setIsEnum(original.getIsEnum());
-        if (original.getEnumInfo() != null) {
-            EnumInfo eiCopy = new EnumInfo();
-            eiCopy.setStorageType(original.getEnumInfo().getStorageType());
-            eiCopy.setPossibleValues(original.getEnumInfo().getPossibleValues() != null ? new ArrayList<>(original.getEnumInfo().getPossibleValues()) : new ArrayList<>());
-            copy.setEnumInfo(eiCopy);
-        }
-        copy.setIsEmbeddedAttribute(original.getIsEmbeddedAttribute());
-        copy.setEmbeddedFromFieldName(original.getEmbeddedFromFieldName());
-        copy.setOriginalEmbeddableFieldName(original.getOriginalEmbeddableFieldName());
-        copy.setInherited(original.getInherited());
-        copy.setInheritedFromClass(original.getInheritedFromClass());
-        return copy;
+        // ... (same implementation) ...
+        ColumnInfo copy = new ColumnInfo(); copy.setFieldName(original.getFieldName()); copy.setColumnName(original.getColumnName()); copy.setJavaType(original.getJavaType()); copy.setSqlType(original.getSqlType()); copy.setPrimaryKey(original.isPrimaryKey()); copy.setGenerationStrategy(original.getGenerationStrategy()); copy.setNullable(original.getNullable()); copy.setUnique(original.getUnique()); copy.setLength(original.getLength()); copy.setPrecision(original.getPrecision()); copy.setScale(original.getScale()); copy.setIsEnum(original.getIsEnum()); if (original.getEnumInfo() != null) { EnumInfo eiCopy = new EnumInfo(); eiCopy.setStorageType(original.getEnumInfo().getStorageType()); eiCopy.setPossibleValues(original.getEnumInfo().getPossibleValues() != null ? new ArrayList<>(original.getEnumInfo().getPossibleValues()) : new ArrayList<>()); copy.setEnumInfo(eiCopy); } copy.setIsEmbeddedAttribute(original.getIsEmbeddedAttribute()); copy.setEmbeddedFromFieldName(original.getEmbeddedFromFieldName()); copy.setOriginalEmbeddableFieldName(original.getOriginalEmbeddableFieldName()); copy.setInherited(original.getInherited()); copy.setInheritedFromClass(original.getInheritedFromClass()); return copy;
     }
 
     private RelationshipInfo deepCopyRelationshipInfo(RelationshipInfo original) { // Instance method ok
-        // ... (implementation remains the same) ...
-        RelationshipInfo copy = new RelationshipInfo();
-        copy.setFieldName(original.getFieldName());
-        copy.setType(original.getType());
-        copy.setTargetEntityJavaClass(original.getTargetEntityJavaClass());
-        copy.setMappedBy(original.getMappedBy());
-        copy.setFetchType(original.getFetchType());
-        copy.setCascadeTypes(original.getCascadeTypes() != null ? new ArrayList<>(original.getCascadeTypes()) : null);
-        copy.setOwningSide(original.isOwningSide());
-        copy.setJoinColumnName(original.getJoinColumnName());
-        copy.setJoinTableName(original.getJoinTableName());
-        copy.setJoinTableJoinColumnName(original.getJoinTableJoinColumnName());
-        copy.setJoinTableInverseJoinColumnName(original.getJoinTableInverseJoinColumnName());
-        copy.setInherited(original.getInherited());
-        copy.setInheritedFromClass(original.getInheritedFromClass());
-        return copy;
+        // ... (same implementation) ...
+        RelationshipInfo copy = new RelationshipInfo(); copy.setFieldName(original.getFieldName()); copy.setType(original.getType()); copy.setTargetEntityJavaClass(original.getTargetEntityJavaClass()); copy.setMappedBy(original.getMappedBy()); copy.setFetchType(original.getFetchType()); copy.setCascadeTypes(original.getCascadeTypes() != null ? new ArrayList<>(original.getCascadeTypes()) : null); copy.setOwningSide(original.isOwningSide()); copy.setJoinColumnName(original.getJoinColumnName()); copy.setJoinTableName(original.getJoinTableName()); copy.setJoinTableJoinColumnName(original.getJoinTableJoinColumnName()); copy.setJoinTableInverseJoinColumnName(original.getJoinTableInverseJoinColumnName()); copy.setInherited(original.getInherited()); copy.setInheritedFromClass(original.getInheritedFromClass()); return copy;
     }
 
     private void addIfNotPresent(List<ColumnInfo> list, ColumnInfo itemToAdd, boolean inherited, String inheritedFrom) { // Instance method ok
@@ -791,9 +712,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
             itemToAdd.setInherited(inherited);
             if(inherited) itemToAdd.setInheritedFromClass(inheritedFrom);
             list.add(itemToAdd);
-        } else {
-            log.trace("Skipping adding inherited/duplicate column field: {}", itemToAdd.getFieldName());
-        }
+        } else { log.trace("Skipping adding inherited/duplicate column field: {}", itemToAdd.getFieldName()); }
     }
     private void addIfNotPresent(List<ColumnInfo> list, ColumnInfo itemToAdd) { // Instance method ok
         addIfNotPresent(list, itemToAdd, false, null);
@@ -804,13 +723,10 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
             itemToAdd.setInherited(inherited);
             if(inherited) itemToAdd.setInheritedFromClass(inheritedFrom);
             list.add(itemToAdd);
-        } else {
-            log.trace("Skipping adding inherited/duplicate relationship field: {}", itemToAdd.getFieldName());
-        }
+        } else { log.trace("Skipping adding inherited/duplicate relationship field: {}", itemToAdd.getFieldName()); }
     }
 
-
-    // Helper class for first pass - made public static
+    // Made public static
     @Data
     public static class MappedSuperclassInfo {
         private String javaClassName;

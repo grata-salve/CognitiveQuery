@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.stream.Stream;
 
+
 @Service
 @Slf4j
 public class SchemaParserService {
@@ -35,46 +36,52 @@ public class SchemaParserService {
     }
 
     public SchemaInfo parseProject(Path projectSourcePath, String repositoryUrl) throws IOException {
-        log.info("Starting schema parsing for project source at: {}", projectSourcePath);
+        log.info("Starting schema parsing for project source root at: {}", projectSourcePath);
         SchemaInfo schemaInfo = new SchemaInfo();
         schemaInfo.setRepositoryUrl(repositoryUrl);
-        schemaInfo.setAnalysisTimestamp(LocalDateTime.now()); // Now LocalDateTime is resolved
+        schemaInfo.setAnalysisTimestamp(LocalDateTime.now());
 
-        // --- Correct Symbol Solver Setup ---
+        // --- Corrected Symbol Solver Setup ---
         CombinedTypeSolver typeSolver = new CombinedTypeSolver();
-        typeSolver.add(new ReflectionTypeSolver(false)); // For JDK types
-        // Ensure the path exists and is a directory
-        if (Files.isDirectory(projectSourcePath)) {
-            typeSolver.add(new JavaParserTypeSolver(projectSourcePath.toFile()));
+        // 1. Solver for JDK classes
+        typeSolver.add(new ReflectionTypeSolver(false));
+
+        // 2. Solver for the project's own source files
+        // Find potential source roots (e.g., src/main/java)
+        List<Path> sourceRoots = findSourceRoots(projectSourcePath);
+        if (sourceRoots.isEmpty()) {
+            log.warn("Could not find standard Java source roots (e.g., src/main/java) within {}. Using project root as source path, symbol resolution may be incomplete.", projectSourcePath);
+            // Fallback: Add the project root itself, hoping sources are directly there
+            if (Files.isDirectory(projectSourcePath)) {
+                typeSolver.add(new JavaParserTypeSolver(projectSourcePath.toFile()));
+            } else {
+                log.error("Project source path is not a directory: {}", projectSourcePath);
+                throw new IOException("Project source path is not a directory: " + projectSourcePath);
+            }
         } else {
-            log.warn("Project source path is not a directory or does not exist: {}", projectSourcePath);
-            // Proceeding without source solver, resolution might fail for project classes
+            log.info("Found source roots: {}", sourceRoots);
+            for (Path root : sourceRoots) {
+                typeSolver.add(new JavaParserTypeSolver(root.toFile()));
+            }
         }
 
+        // 3. Configure Parser to use the solver
         JavaSymbolSolver symbolSolver = new JavaSymbolSolver(typeSolver);
-
-        // Configure StaticJavaParser to use the symbol solver
-        ParserConfiguration parserConfig = StaticJavaParser.getConfiguration();
-        parserConfig.setSymbolResolver(symbolSolver);
+        ParserConfiguration parserConfig = new ParserConfiguration().setSymbolResolver(symbolSolver);
         // --- End Symbol Solver Setup ---
 
-
         Map<String, JpaAnnotationVisitor.MappedSuperclassInfo> mappedSuperclasses = new HashMap<>();
-        // Initialize embeddables list here
         List<EmbeddableInfo> embeddables = new ArrayList<>();
-        schemaInfo.setEmbeddables(embeddables); // Set the initialized list
-
+        schemaInfo.setEmbeddables(embeddables);
         Map<String, Path> allJavaFiles = findAllJavaFiles(projectSourcePath);
-
 
         // First pass: Parse MappedSuperclasses and Embeddables
         log.debug("Starting first pass: Parsing MappedSuperclasses and Embeddables from {} files", allJavaFiles.size());
-        for (Map.Entry<String, Path> entry : allJavaFiles.entrySet()) {
-            Path javaFile = entry.getValue();
+        for (Path javaFile : allJavaFiles.values()) { // Iterate over values directly
             try {
-                // Use the configured parser
-                CompilationUnit cu = StaticJavaParser.parse(javaFile);
-                JpaAnnotationVisitor visitor = new JpaAnnotationVisitor(mappedSuperclasses, embeddables); // Pass the initialized list
+                // Parse using the configured parser
+                CompilationUnit cu = StaticJavaParser.parse(javaFile, parserConfig.getCharacterEncoding()); // Pass config
+                JpaAnnotationVisitor visitor = new JpaAnnotationVisitor(mappedSuperclasses, embeddables);
                 visitor.visit(cu, JpaAnnotationVisitor.ProcessingPass.FIRST_PASS);
             } catch (Exception e) {
                 log.warn("Failed to parse Java file during first pass: {} - {}", javaFile, e.getMessage(), e);
@@ -86,12 +93,10 @@ public class SchemaParserService {
 
         // Second pass: Parse Entities
         log.debug("Starting second pass: Parsing Entities");
-        // Initialize entities list
         schemaInfo.setEntities(new ArrayList<>());
-        for (Map.Entry<String, Path> entry : allJavaFiles.entrySet()) {
-            Path javaFile = entry.getValue();
+        for (Path javaFile : allJavaFiles.values()) {
             try {
-                CompilationUnit cu = StaticJavaParser.parse(javaFile);
+                CompilationUnit cu = StaticJavaParser.parse(javaFile, parserConfig.getCharacterEncoding()); // Pass config
                 JpaAnnotationVisitor visitor = new JpaAnnotationVisitor(mappedSuperclasses, embeddables, schemaInfo);
                 visitor.visit(cu, JpaAnnotationVisitor.ProcessingPass.SECOND_PASS);
             } catch (Exception e) {
@@ -103,6 +108,7 @@ public class SchemaParserService {
         return schemaInfo;
     }
 
+    // ... (writeSchemaToJsonFile method remains the same) ...
     public void writeSchemaToJsonFile(SchemaInfo schemaInfo, Path outputFile) throws IOException {
         log.info("Writing parsed schema to JSON file: {}", outputFile);
         Files.createDirectories(outputFile.getParent());
@@ -111,21 +117,48 @@ public class SchemaParserService {
     }
 
 
+    // Helper to find standard Java source roots (like src/main/java)
+    private List<Path> findSourceRoots(Path projectRoot) throws IOException {
+        List<Path> roots = new ArrayList<>();
+        Path srcMainJava = projectRoot.resolve("src").resolve("main").resolve("java");
+        if (Files.isDirectory(srcMainJava)) {
+            roots.add(srcMainJava);
+        }
+        // Add other potential roots if needed (e.g., src/generated/java)
+        // Or, as a fallback, search for any 'java' directory under 'src'
+        if (roots.isEmpty() && Files.isDirectory(projectRoot.resolve("src"))) {
+            try (Stream<Path> walk = Files.walk(projectRoot.resolve("src"), 3)) { // Limit depth
+                walk.filter(Files::isDirectory)
+                        .filter(p -> p.getFileName().toString().equals("java"))
+                        .forEach(roots::add);
+            }
+        }
+
+        return roots;
+    }
+
     private Map<String, Path> findAllJavaFiles(Path projectSourcePath) throws IOException {
+        // ... (implementation remains the same) ...
         Map<String, Path> fileMap = new HashMap<>();
-        // Check if the source path exists before walking
         if (!Files.exists(projectSourcePath) || !Files.isDirectory(projectSourcePath)) {
             log.error("Project source path does not exist or is not a directory: {}", projectSourcePath);
-            return fileMap; // Return empty map
+            return fileMap;
         }
         try (Stream<Path> walk = Files.walk(projectSourcePath)) {
             walk
                     .filter(Files::isRegularFile)
                     .filter(path -> path.toString().endsWith(".java"))
-                    // Filter out .DS_Store implicitly by checking .java suffix
                     .forEach(path -> {
-                        String key = projectSourcePath.relativize(path).toString();
-                        fileMap.put(key, path);
+                        try {
+                            // Use a more robust key, like the fully qualified class name if possible,
+                            // but relative path is a reasonable fallback.
+                            String key = projectSourcePath.relativize(path).toString();
+                            fileMap.put(key, path);
+                        } catch (IllegalArgumentException e) {
+                            // Handle cases where relativize might fail (e.g., different drives on Windows)
+                            log.warn("Could not relativize path {}, using absolute path as key.", path, e);
+                            fileMap.put(path.toString(), path); // Fallback to absolute path
+                        }
                     });
         }
         return fileMap;
