@@ -3,9 +3,9 @@ spring:
     name: CognitiveQuery
 
   datasource:
-    url: jdbc:postgresql://localhost:5432/cognitivequerydb
-    username: grata
-    password: postgres
+    url: ${POSTGRES_URL}
+    username: ${POSTGRES_USER}
+    password: ${POSTGRES_PASSWORD}
     driver-class-name: org.postgresql.Driver
 
   security:
@@ -13,8 +13,8 @@ spring:
       client:
         registration:
           github:
-            client-id: Iv23liUi3knWdKrsTWJ1
-            client-secret: 6f7fba06809aca1b64db8db42dd687d1ad5d2314
+            client-id: ${GITHUB_CLIENT_ID}
+            client-secret: ${GITHUB_CLIENT_SECRET}
             scope: read:user, user:email
             redirect-uri: http://localhost:8080/login/oauth2/code/github
 
@@ -22,35 +22,39 @@ spring:
     database-platform: org.hibernate.dialect.PostgreSQLDialect
     hibernate:
       ddl-auto: update
-    show-sql: true
+      show-sql: true
     properties:
       hibernate:
         format_sql: true
 
-  github:
-    token:
-      url: https://github.com/login/oauth/access_token
-    user:
-      info:
-        url: https://api.github.com/user
+github:
+  token:
+    url: https://github.com/login/oauth/access_token
+  user:
+    info:
+      url: https://api.github.com/user
 
-  app:
-    oauth:
-      state:
-        ttl:
-          minutes: 10
-    analysis:
-      output:
-        # Base path on the server to store processed entity folders
-        base-path: /tmp/cognitivequery/processed
+app:
+  oauth:
+    state:
+      ttl:
+        minutes: 10
+  analysis:
+    output:
+      base-path: ${BASE_PATH}
 
 telegram:
   bot:
-    username: cognitivequery_bot
-    token: 7636713589:AAFA3_CuXaDs2v_Wm9SJKDaJ9jKu0zY6uko
+    username: ${TELEGRAM_BOT_USERNAME}
+    token: ${TELEGRAM_BOT_TOKEN}
 
 backend:
   api:
-    # URL, по которому бот будет обращаться к вашему Spring Boot приложению
-    # Если бот и бэкенд работают на одной машине для тестов:
-    base-url: http://localhost:8080
+    base-url: ${BACKEND_BASE_URL}
+
+google:
+  gemini:
+    api:
+      key: ${GEMINI_API_KEY}
+      model: gemini-1.5-flash
+      base-url: https://generativelanguage.googleapis.com/v1beta
