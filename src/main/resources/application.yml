@@ -51,3 +51,10 @@ telegram:
 backend:
   api:
     base-url: ${BACKEND_BASE_URL}
+
+google:
+  gemini:
+    api:
+      key: ${GEMINI_API_KEY}
+      model: gemini-1.5-flash
+      base-url: https://generativelanguage.googleapis.com/v1beta
