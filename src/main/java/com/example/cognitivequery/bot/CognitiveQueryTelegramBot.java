@@ -2,6 +2,7 @@ package com.example.cognitivequery.bot;
 
 import com.example.cognitivequery.model.AppUser;
 import com.example.cognitivequery.repository.UserRepository;
+import com.example.cognitivequery.service.projectextractor.GitInfoService;
 import com.example.cognitivequery.service.projectextractor.ProjectAnalyzerService;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
@@ -19,9 +20,13 @@ import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
 
+import java.nio.file.Files;
+import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -34,6 +39,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     private final UserRepository userRepository;
     private final ProjectAnalyzerService projectAnalyzerService;
     private final WebClient webClient;
+    private final GitInfoService gitInfoService;
 
     private final Map<Long, UserState> userStates = new ConcurrentHashMap<>();
 
@@ -47,15 +53,16 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
             @Value("${backend.api.base-url}") String backendApiBaseUrl,
             UserRepository userRepository,
             ProjectAnalyzerService projectAnalyzerService,
+            GitInfoService gitInfoService,
             WebClient.Builder webClientBuilder
     ) {
         super(botToken);
         this.botUsername = botUsername;
-        // this.backendApiBaseUrl = backendApiBaseUrl;
         this.userRepository = userRepository;
         this.projectAnalyzerService = projectAnalyzerService;
+        this.gitInfoService = gitInfoService;
         this.webClient = webClientBuilder.baseUrl(backendApiBaseUrl).build();
-        log.info("Telegram Bot initialized. Username: {}, Token: ***, Backend API: {}", botUsername, backendApiBaseUrl);
+        log.info("Telegram Bot initialized...");
     }
 
     @PostConstruct
@@ -202,38 +209,97 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         userStates.remove(userId);
 
         Matcher matcher = GITHUB_URL_PATTERN.matcher(repoUrl.trim());
-        if (!matcher.matches()) {
-            return;
-        }
+        if (!matcher.matches()) { return; }
 
         String validatedUrl = repoUrl.trim();
         final String userTelegramId = appUser.getTelegramId();
 
-        sendMessage(chatId, "Received repository URL: " + validatedUrl + "\n⏳ Starting analysis... This may take a while.");
+        sendMessage(chatId, "Checking repository status...");
+        Optional<String> currentCommitHashOpt = gitInfoService.getRemoteHeadCommitHash(validatedUrl);
+
+        if (currentCommitHashOpt.isEmpty()) {
+            log.warn("Could not get current commit hash for {}. Proceeding with analysis.", validatedUrl);
+            performAnalysis(chatId, userId, appUser, validatedUrl, "UNKNOWN");
+            return;
+        }
+
+        String currentCommitHash = currentCommitHashOpt.get();
+        log.info("Current commit hash for {}: {}", validatedUrl, currentCommitHash);
+
+        boolean needsAnalysis = true;
+        String reason = "";
+
+        if (validatedUrl.equals(appUser.getLastAnalyzedRepoUrl()) && currentCommitHash.equals(appUser.getLastAnalyzedCommitHash())) {
+            log.debug("Repository URL and Commit Hash match the last analysis.");
+            String existingSchemaPathStr = appUser.getProcessedSchemaPath();
+            if (existingSchemaPathStr != null && !existingSchemaPathStr.isBlank()) {
+                try {
+                    Path existingSchemaPath = Paths.get(existingSchemaPathStr);
+                    if (Files.exists(existingSchemaPath) && Files.isRegularFile(existingSchemaPath)) {
+                        log.info("Existing schema file found and is valid: {}", existingSchemaPath);
+                        needsAnalysis = false;
+                        sendMessage(chatId, "✅ This repository version was already analyzed.\nSchema is available at: " + existingSchemaPath + "\n(Note: This path is on the server)");
+                    } else {
+                        log.warn("Schema file path found in DB, but file does not exist or is not a regular file: {}", existingSchemaPath);
+                        reason = "Previous analysis result file is missing.";
+                    }
+                } catch (InvalidPathException e) {
+                    log.error("Invalid schema file path stored in DB: {}", existingSchemaPathStr, e);
+                    reason = "Invalid path stored for previous analysis result.";
+                }
+            } else {
+                log.warn("Commit hash matches, but no schema path stored in DB for user {} and URL {}", userTelegramId, validatedUrl);
+                reason = "Metadata indicates previous analysis, but result path is missing.";
+            }
+        } else {
+            log.info("Repository URL or commit hash differs. Previous URL: {}, Previous Hash: {}, Current Hash: {}",
+                    appUser.getLastAnalyzedRepoUrl(), appUser.getLastAnalyzedCommitHash(), currentCommitHash);
+            reason = "Repository has been updated or this is a new URL.";
+        }
+
+        if (needsAnalysis) {
+            log.info("Proceeding with analysis. Reason: {}", reason.isEmpty() ? "Initial analysis or mismatch" : reason);
+            performAnalysis(chatId, userId, appUser, validatedUrl, currentCommitHash);
+        }
+    }
+
+    private void performAnalysis(long chatId, long userId, AppUser appUser, String validatedUrl, String commitHashToSave) {
+        sendMessage(chatId, "⏳ Starting analysis for " + validatedUrl + (commitHashToSave.equals("UNKNOWN") ? "" : " (version: " + commitHashToSave.substring(0, 7) + ")") + "... This may take a while.");
 
         Thread analysisThread = new Thread(() -> {
-            MDC.put("telegramId", userTelegramId);
+            MDC.put("telegramId", appUser.getTelegramId());
+            boolean success = false;
+            Path resultSchemaPath = null;
             try {
                 boolean cleanupClone = true;
-
-                Path resultSchemaPath = projectAnalyzerService.analyzeAndProcessProject(validatedUrl, userTelegramId, cleanupClone);
-
-                log.info("Analysis complete. Schema IR file path: {}", resultSchemaPath);
+                resultSchemaPath = projectAnalyzerService.analyzeAndProcessProject(validatedUrl, appUser.getTelegramId(), cleanupClone);
+                success = true;
+                log.info("Analysis thread complete. Schema IR file path: {}", resultSchemaPath);
 
                 try {
                     AppUser userToUpdate = userRepository.findById(appUser.getId())
                             .orElseThrow(() -> new RuntimeException("User not found for saving results"));
 
-                    userToUpdate.setAnalysisResults(validatedUrl, resultSchemaPath.toString());
+                    userToUpdate.setAnalysisResults(validatedUrl, resultSchemaPath.toString(), commitHashToSave);
                     userRepository.save(userToUpdate);
-                    log.info("Saved analysis results (schema path)");
+                    log.info("Saved analysis results (schema path and commit hash)");
 
                     sendMessage(chatId, "✅ Analysis successful!\nRepository: " + validatedUrl + "\nSchema representation saved at: " + resultSchemaPath + "\n(Note: This path is on the server)");
 
-                } catch (Exception dbEx) { /* ... DB error processing ... */ }
+                } catch (Exception dbEx) {
+                    log.error("Failed to save analysis results path/hash to DB", dbEx);
+                    sendMessage(chatId, "⚠️ Analysis was done (schema generated at " + resultSchemaPath + "), but I failed to save the results metadata.");
+                }
 
-            } catch (Exception analysisEx) { /* ... analysis error processing ... */ } finally {
-                userStates.remove(userId);
+            } catch (Exception analysisEx) {
+                log.error("Analysis failed for URL {}", validatedUrl, analysisEx);
+                String reason = analysisEx.getMessage();
+                if (analysisEx.getCause() != null) {
+                    reason += " (Cause: " + analysisEx.getCause().getMessage() + ")";
+                }
+                sendMessage(chatId, "❌ Analysis failed for repository: " + validatedUrl + "\nReason: " + reason);
+            } finally {
+                // userStates.remove(userId);
                 MDC.remove("telegramId");
             }
         });

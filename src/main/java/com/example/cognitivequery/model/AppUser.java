@@ -52,6 +52,9 @@ public class AppUser {
     @Column(length = 2048)
     private String processedSchemaPath; // Renamed: Path to the generated schema JSON file
 
+    @Column(length = 40) // SHA-1 hash is 40 chars
+    private String lastAnalyzedCommitHash;
+
     public AppUser(String telegramId) {
         this.telegramId = telegramId;
         this.provider = AuthProvider.TELEGRAM;
@@ -85,7 +88,12 @@ public class AppUser {
         this.lastLogin = LocalDateTime.now();
     }
 
-    // Updated method name to reflect it saves the schema path
+    public void setAnalysisResults(String repoUrl, String schemaPath, String commitHash) {
+        this.lastAnalyzedRepoUrl = repoUrl;
+        this.processedSchemaPath = schemaPath;
+        this.lastAnalyzedCommitHash = commitHash;
+    }
+
     public void setAnalysisResults(String repoUrl, String schemaPath) {
         this.lastAnalyzedRepoUrl = repoUrl;
         this.processedSchemaPath = schemaPath;
