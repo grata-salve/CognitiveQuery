@@ -42,6 +42,9 @@ app:
   analysis:
     output:
       base-path: ${BASE_PATH}
+  db:
+    encryption:
+      key: ${APP_DB_ENCRYPTION_KEY}
 
 telegram:
   bot:
@@ -62,4 +65,3 @@ google:
 logging:
   level:
     com.example.cognitivequery.bot: DEBUG
-    # ... другие настройки ...

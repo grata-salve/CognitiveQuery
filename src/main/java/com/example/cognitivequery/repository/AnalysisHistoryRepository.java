@@ -14,13 +14,13 @@ public interface AnalysisHistoryRepository extends JpaRepository<AnalysisHistory
     // Find by user, repo URL, and commit hash (for checking exact version)
     Optional<AnalysisHistory> findByAppUserAndRepositoryUrlAndCommitHash(AppUser appUser, String repositoryUrl, String commitHash);
 
-    // Find the latest entry for a user (default for /query)
+    // Find the latest entry for a user (default for /query if no context)
     Optional<AnalysisHistory> findFirstByAppUserOrderByAnalyzedAtDesc(AppUser appUser);
 
-    // Find the latest entry for a user and specific repo URL (for /use_schema)
+    // Find the latest entry for a user and specific repo URL (for /use_schema and checking cache)
     Optional<AnalysisHistory> findFirstByAppUserAndRepositoryUrlOrderByAnalyzedAtDesc(AppUser appUser, String repositoryUrl);
 
-    // Find all entries for a user and repo URL (for cleanup)
+    // Find all entries for a user and repo URL (for cleanup before saving new)
     List<AnalysisHistory> findByAppUserAndRepositoryUrl(AppUser appUser, String repositoryUrl);
 
     // Find all entries for a user (for /list_schemas)

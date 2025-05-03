@@ -7,31 +7,32 @@ import lombok.Setter;
 import lombok.ToString;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
 @Entity
 @Table(name = "app_users", uniqueConstraints = {
-        @UniqueConstraint(columnNames = {"telegramId", "provider"}),
+        @UniqueConstraint(columnNames = {"telegramId"}), // Make telegramId unique
         @UniqueConstraint(columnNames = {"githubId", "provider"})
 })
 @Getter
 @Setter
 @NoArgsConstructor
-@ToString
+@ToString(exclude = "analysisHistories") // Avoid infinite loop in toString if bidirectional
 public class AppUser {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false)
+    @Column(nullable = false, unique = true)
     private String telegramId;
 
+    // GitHub related fields
     @Column(unique = true, nullable = true)
     private String githubId;
-
     @Column(nullable = true)
     private String githubLogin;
-
     private String name;
     private String email;
     private String avatarUrl;
@@ -40,9 +41,14 @@ public class AppUser {
     @Column(nullable = false)
     private AuthProvider provider = AuthProvider.TELEGRAM;
 
-    private LocalDateTime lastLogin;
+    private LocalDateTime lastLogin; // Last GitHub login time
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
+
+    // Relationship to analysis history
+    @OneToMany(mappedBy = "appUser", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    private List<AnalysisHistory> analysisHistories = new ArrayList<>();
+
 
     public AppUser(String telegramId) {
         this.telegramId = telegramId;
@@ -76,5 +82,4 @@ public class AppUser {
         }
         this.lastLogin = LocalDateTime.now();
     }
-
 }
