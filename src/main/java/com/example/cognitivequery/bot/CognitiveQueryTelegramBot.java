@@ -48,8 +48,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-import static com.example.cognitivequery.service.db.DynamicQueryExecutorService.MAX_SELECT_ROWS;
-
 @Component
 @Slf4j
 public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
@@ -62,18 +60,29 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     private final GeminiService geminiService;
     private final AnalysisHistoryRepository analysisHistoryRepository;
     private final EncryptionService encryptionService;
-    private final DynamicQueryExecutorService queryExecutorService; // Added field
+    private final DynamicQueryExecutorService queryExecutorService;
 
+    // User state management (in-memory)
     private final Map<Long, UserState> userStates = new ConcurrentHashMap<>();
+    // Store data during multi-step operations
     private final Map<Long, AnalysisInputState> analysisInputState = new ConcurrentHashMap<>();
     private final Map<Long, DbCredentialsInput> credentialsInputState = new ConcurrentHashMap<>();
+    // Store context for query command: Telegram User ID (Long) -> AnalysisHistory ID (Long)
     private final Map<Long, Long> userQueryContextHistoryId = new ConcurrentHashMap<>();
+    // Store last generated SQL: Telegram User ID (Long) -> "HistoryID:SQL"
     private final Map<Long, String> lastGeneratedSql = new ConcurrentHashMap<>();
 
     private static final Pattern GITHUB_URL_PATTERN = Pattern.compile(
             "^(https?://)?(www\\.)?github\\.com/[\\w.-]+/[\\w.-]+(/)?(?:\\.git)?/?$", Pattern.CASE_INSENSITIVE);
+    // Pattern for basic URL validation (http/https) - used for /set_db_credentials
+    private static final Pattern BASIC_URL_PATTERN = Pattern.compile("^https?://.+", Pattern.CASE_INSENSITIVE);
+    // Pattern for MarkdownV2 escaping - including hyphen
     private static final Pattern ESCAPE_PATTERN = Pattern.compile("([_*~`>\\[\\]()#\\+\\-=|{}.!-])");
 
+    // Define MAX_SELECT_ROWS as a constant in the bot class
+    private static final int MAX_SELECT_ROWS = 50;
+
+    // Thread pool for background tasks
     private final ExecutorService taskExecutor = Executors.newCachedThreadPool();
 
     public CognitiveQueryTelegramBot(
@@ -86,7 +95,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
             GeminiService geminiService,
             AnalysisHistoryRepository analysisHistoryRepository,
             EncryptionService encryptionService,
-            DynamicQueryExecutorService queryExecutorService, // Added to constructor
+            DynamicQueryExecutorService queryExecutorService,
             WebClient.Builder webClientBuilder
     ) {
         super(botToken);
@@ -97,7 +106,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         this.geminiService = geminiService;
         this.analysisHistoryRepository = analysisHistoryRepository;
         this.encryptionService = encryptionService;
-        this.queryExecutorService = queryExecutorService; // Assign injected service
+        this.queryExecutorService = queryExecutorService;
         this.webClient = webClientBuilder.baseUrl(backendApiBaseUrl).build();
         log.info("Telegram Bot initialized. Username: {}, Backend API: {}", botUsername, backendApiBaseUrl);
     }
@@ -162,7 +171,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         if (update.hasMessage() && update.getMessage().hasText()) {
             Message message = update.getMessage();
             long chatId = message.getChatId();
-            long userId = message.getFrom().getId();
+            long userId = message.getFrom().getId(); // Use long primitive type consistently for ID
             String telegramIdStr = String.valueOf(userId);
 
             MDC.put("telegramId", telegramIdStr);
@@ -200,15 +209,15 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                         userStates.remove(userId);
                         log.warn("Command received while waiting for repo URL.");
                     }
-                } else if (currentState == UserState.WAITING_FOR_REPO_URL_FOR_CREDS) { // Added this state check
+                } else if (currentState == UserState.WAITING_FOR_REPO_URL_FOR_CREDS) {
                     if (!messageText.startsWith("/")) {
                         handleRepoUrlForCredsInput(chatId, userId, appUser, messageText);
                         processed = true;
                     } else {
                         userStates.remove(userId);
-                        analysisInputState.remove(userId);
+                        credentialsInputState.remove(userId);
                         log.warn("Command received while waiting for repo URL for credentials.");
-                    }
+                    } // Use credentials map here
                 } else if (currentState == UserState.WAITING_FOR_LLM_QUERY) {
                     if (!messageText.startsWith("/")) {
                         handleQueryInput(chatId, userId, appUser, messageText);
@@ -236,15 +245,15 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                         processed = true;
                     } else if (commandPart.equals("/use_schema")) {
                         String repoUrl = messageText.length() > 12 ? messageText.substring(12).trim() : "";
-                        handleUseSchemaCommand(chatId, appUser, repoUrl); // Definition added below
+                        handleUseSchemaCommand(chatId, appUser, repoUrl);
                         processed = true;
                     } else if (commandPart.equals("/set_db_credentials")) {
-                        analysisInputState.put(userId, new AnalysisInputState());
+                        credentialsInputState.put(userId, new DbCredentialsInput()); // Use direct credential state map
                         userStates.put(userId, UserState.WAITING_FOR_REPO_URL_FOR_CREDS);
-                        sendMessage(chatId, "Which repository's DB credentials do you want to set\\?\nPlease enter the full HTTPS URL:");
+                        sendMessage(chatId, "Which repository's DB credentials do you want to set or update\\?\nPlease enter the full URL:");
                         processed = true;
                     } else {
-                        handleCommand(chatId, userId, telegramIdStr, appUser, messageText, userFirstName); // Handle simple commands
+                        handleCommand(chatId, userId, telegramIdStr, appUser, messageText, userFirstName);
                         processed = true;
                     }
                 }
@@ -257,7 +266,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
 
             } catch (Exception e) {
                 log.error("Unhandled exception during update processing", e);
-                sendMessage(chatId, "An unexpected error occurred while processing your message\\.");
+                sendMessage(chatId, "An unexpected error occurred\\.");
             } finally {
                 MDC.remove("telegramId");
             }
@@ -266,56 +275,51 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
 
     private AppUser findOrCreateUser(String telegramIdStr) {
         try {
-            return userRepository.findByTelegramId(telegramIdStr)
-                    .orElseGet(() -> {
-                        log.info("User not found, creating new.");
-                        AppUser newUser = new AppUser(telegramIdStr);
-                        return userRepository.save(newUser);
-                    });
+            return userRepository.findByTelegramId(telegramIdStr).orElseGet(() -> {
+                log.info("User not found, creating new.");
+                AppUser newUser = new AppUser(telegramIdStr);
+                return userRepository.save(newUser);
+            });
         } catch (Exception e) {
             log.error("Database error fetching/creating user.", e);
             return null;
         }
     }
 
-    // Handles simple commands without arguments after specific commands are routed
     private void handleCommand(long chatId, long userId, String telegramIdStr, AppUser appUser, String command, String userFirstName) {
-        // Reset state and context only if it's not a command that initiates a stateful flow handled elsewhere
         if (!List.of("/analyze_repo", "/query", "/use_schema", "/set_db_credentials").contains(command.split("\\s+")[0])) {
             userStates.remove(userId);
             userQueryContextHistoryId.remove(userId);
             analysisInputState.remove(userId);
             credentialsInputState.remove(userId);
         }
-
         if (appUser == null && List.of("/analyze_repo", "/query", "/list_schemas", "/use_schema", "/set_db_credentials").contains(command.split("\\s+")[0])) {
             sendMessage(chatId, "Cannot process command due to a temporary issue accessing user data\\.");
             return;
         }
-
         switch (command) {
             case "/start":
-                sendMessage(chatId, "Hello, " + escapeMarkdownV2(userFirstName) + "\\! I'm CognitiveQuery bot\\.\n➡️ Use `/connect_github`\n➡️ Use `/analyze_repo`\n➡️ Use `/query <your question>`\n➡️ Use `/list_schemas` & `/use_schema <url>`");
+                sendMessage(chatId, "Hello, " + escapeMarkdownV2(userFirstName) + "\\! I'm CognitiveQuery bot\\.\n➡️ Use `/connect_github`\n➡️ Use `/analyze_repo`\n➡️ Use `/query <your question>`\n➡️ Use `/list_schemas` & `/use_schema <url>`\n➡️ Use `/set_db_credentials`");
                 break;
             case "/connect_github":
                 initiateGithubAuthFlow(chatId, telegramIdStr);
-                break; // Definition added below
+                break;
             case "/analyze_repo":
                 startRepoAnalysisFlow(chatId, userId, appUser);
-                break; // Definition added below
+                break;
             case "/list_schemas":
                 handleListSchemasCommand(chatId, appUser);
-                break; // Definition added below
+                break;
             case "/help":
                 sendMessage(chatId, "Available commands:\n`/connect_github` \\- Link GitHub\n`/analyze_repo` \\- Analyze repository schema\n`/query <question>` \\- Ask about data \\(uses context\\)\n`/list_schemas` \\- List analyzed repositories\n`/use_schema <repo_url>` \\- Set context for `/query`\n`/set_db_credentials` \\- Set DB credentials for a repo\n`/help` \\- Show this message");
                 break;
             default:
-                sendMessage(chatId, "Sorry, I don't understand that command\\. Try `/help`\\.");
+                if (!command.startsWith("/query") && !command.startsWith("/use_schema") && !command.startsWith("/set_db_credentials")) {
+                    sendMessage(chatId, "Sorry, I don't understand that command\\. Try `/help`\\.");
+                }
                 break;
         }
     }
-
-    // --- ADDED MISSING METHOD DEFINITIONS ---
 
     private void handleListSchemasCommand(long chatId, AppUser appUser) {
         List<AnalysisHistory> history = analysisHistoryRepository.findByAppUserOrderByAnalyzedAtDesc(appUser);
@@ -326,31 +330,26 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         StringBuilder sb = new StringBuilder("Analyzed repositories \\(latest first\\):\n");
         history.stream()
                 .collect(Collectors.groupingBy(AnalysisHistory::getRepositoryUrl, Collectors.maxBy(Comparator.comparing(AnalysisHistory::getAnalyzedAt))))
-                .values().stream()
-                .filter(Optional::isPresent)
-                .map(Optional::get)
-                .sorted(Comparator.comparing(AnalysisHistory::getAnalyzedAt).reversed())
-                .limit(15)
+                .values().stream().filter(Optional::isPresent).map(Optional::get)
+                .sorted(Comparator.comparing(AnalysisHistory::getAnalyzedAt).reversed()).limit(15)
                 .forEach(h -> {
-                    String repoUrl = h.getRepositoryUrl();
-                    String commit = h.getCommitHash().substring(0, 7);
+                    String escapedRepoUrl = escapeMarkdownV2(h.getRepositoryUrl());
+                    String escapedCommit = escapeMarkdownV2(h.getCommitHash().substring(0, 7));
                     String date = escapeMarkdownV2(h.getAnalyzedAt().format(DateTimeFormatter.ISO_DATE));
-                    String escapedRepoUrl = escapeMarkdownV2(repoUrl);
-                    String escapedCommit = escapeMarkdownV2(commit);
-                    sb.append(String.format("\\- `%s` \\(Analyzed: %s, Version: `%s`\\)\n", escapedRepoUrl, date, escapedCommit));
+                    sb.append(String.format("\\- `%s` \\(Analyzed: %s, Version: `%s`\\)%s\n", escapedRepoUrl, date, escapedCommit, h.hasCredentials() ? " \\(DB creds saved\\)" : ""));
                 });
-        sb.append("\nUse `/use_schema <repo_url>` to set the context for `/query`\\.");
+        sb.append("\nUse `/use_schema <repo_url>` to set the context for `/query`\\.\nUse `/set_db_credentials` to add/update DB details\\.");
         sendMessage(chatId, sb.toString());
     }
 
     private void handleUseSchemaCommand(long chatId, AppUser appUser, String repoUrl) {
         if (repoUrl == null || repoUrl.isBlank()) {
-            sendMessage(chatId, "Please provide the repository URL after the command, e\\.g\\., `/use_schema https://github.com/owner/repo`");
+            sendMessage(chatId, "Please provide the repository URL, e\\.g\\., `/use_schema https://github.com/owner/repo`");
             return;
         }
         Optional<AnalysisHistory> historyOpt = analysisHistoryRepository.findFirstByAppUserAndRepositoryUrlOrderByAnalyzedAtDesc(appUser, repoUrl);
         if (historyOpt.isPresent()) {
-            userQueryContextHistoryId.put(appUser.getId(), historyOpt.get().getId());
+            userQueryContextHistoryId.put(appUser.getId(), historyOpt.get().getId()); // Use AppUser DB ID as key for context map
             sendMessage(chatId, "✅ Query context set to: `" + escapeMarkdownV2(repoUrl) + "` \\(version: `" + escapeMarkdownV2(historyOpt.get().getCommitHash().substring(0, 7)) + "`\\)\\.\nNow you can use `/query <your question>`\\.");
         } else {
             sendMessage(chatId, "❌ You haven't analyzed this repository yet: `" + escapeMarkdownV2(repoUrl) + "`\\.\nPlease use `/analyze_repo` first\\.");
@@ -365,33 +364,21 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         try {
             ParameterizedTypeReference<Map<String, String>> typeRef = new ParameterizedTypeReference<>() {
             };
-            Map<String, String> response = webClient.post()
-                    .uri("/api/auth/github/initiate")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .bodyValue(requestBody)
-                    .retrieve()
-                    .onStatus(status -> status.is4xxClientError() || status.is5xxServerError(),
-                            clientResponse -> clientResponse.bodyToMono(String.class)
-                                    .map(errorBody -> new RuntimeException("Backend API error: " + clientResponse.statusCode() + " Body: " + errorBody)))
-                    .bodyToMono(typeRef)
-                    .block();
-
+            Map<String, String> response = webClient.post().uri("/api/auth/github/initiate").contentType(MediaType.APPLICATION_JSON).bodyValue(requestBody).retrieve().onStatus(status -> status.is4xxClientError() || status.is5xxServerError(), cr -> cr.bodyToMono(String.class).map(eB -> new RuntimeException("BE API err: " + cr.statusCode() + " Body: " + eB))).bodyToMono(typeRef).block();
             if (response != null && response.containsKey("authorizationUrl")) {
                 String authUrl = response.get("authorizationUrl");
                 log.info("Received authorization URL: {}...", authUrl.substring(0, Math.min(authUrl.length(), 100)));
                 String reply = "Please click the link below to authorize with GitHub:\n\n" + authUrl + "\n\nAfter authorization, you can use `/analyze_repo`\\.";
                 sendMessage(chatId, reply);
             } else {
-                log.error("Failed to get authorization URL from backend. Response: {}", response);
+                log.error("Failed to get auth URL. Response: {}", response);
                 sendMessage(chatId, "Sorry, I couldn't get the authorization link\\. Unexpected response\\.");
             }
         } catch (Exception e) {
-            log.error("Error calling backend API to initiate auth", e);
-            sendMessage(chatId, "An error occurred while contacting the backend \\(" + escapeMarkdownV2(e.getMessage()) + "\\)\\.");
+            log.error("Error calling backend API", e);
+            sendMessage(chatId, "An error occurred while contacting backend \\(" + escapeMarkdownV2(e.getMessage()) + "\\)\\.");
         }
     }
-
-    // --- End of added missing methods ---
 
     private void startRepoAnalysisFlow(long chatId, long userId, AppUser appUser) {
         if (appUser.getGithubId() == null || appUser.getGithubId().isEmpty()) {
@@ -404,24 +391,17 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     }
 
     private void handleRepoUrlForCredsInput(long chatId, long userId, AppUser appUser, String repoUrl) {
-        AnalysisInputState input = analysisInputState.get(userId);
-        if (input == null) {
-            log.error("AnalysisInputState missing for user {} in REPO_URL_FOR_CREDS", userId);
-            userStates.remove(userId);
-            return;
-        }
-        Matcher matcher = GITHUB_URL_PATTERN.matcher(repoUrl.trim());
+        DbCredentialsInput credsInput = credentialsInputState.computeIfAbsent(userId, k -> new DbCredentialsInput());
+        Matcher matcher = BASIC_URL_PATTERN.matcher(repoUrl.trim());
         if (!matcher.matches()) {
-            sendMessage(chatId, "Invalid GitHub URL format\\. Please enter the URL again\\.");
+            sendMessage(chatId, "The input doesn't look like a valid URL starting with `http://` or `https://`\\. Please enter the URL again\\.");
             return;
         }
-        input.setRepoUrl(repoUrl.trim());
-        log.info("Received repo URL for setting credentials: {}", input.getRepoUrl());
+        credsInput.setAssociatedRepoUrl(repoUrl.trim());
+        log.info("Received repo URL for setting credentials: {}", credsInput.getAssociatedRepoUrl());
         userStates.put(userId, UserState.WAITING_FOR_DB_HOST);
-        input.setCredentials(new DbCredentialsInput());
-        sendMessage(chatId, "OK\\. Now enter the DB **hostname** or **IP address** for `" + escapeMarkdownV2(input.getRepoUrl()) + "`:");
+        sendMessage(chatId, "OK\\. Now enter the DB **hostname** or **IP address** for `" + escapeMarkdownV2(credsInput.getAssociatedRepoUrl()) + "`:");
     }
-
 
     private void handleRepoUrlInput(long chatId, long userId, AppUser appUser, String repoUrl) {
         AnalysisInputState input = analysisInputState.get(userId);
@@ -433,20 +413,19 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
 
         Matcher matcher = GITHUB_URL_PATTERN.matcher(repoUrl.trim());
         if (!matcher.matches()) {
-            sendMessage(chatId, "Invalid GitHub URL format\\. Please try again\\.");
+            sendMessage(chatId, "Invalid GitHub URL format\\. Please enter a valid GitHub repository URL \\(e\\.g\\., `https://github.com/owner/repo`\\)\\.");
             return;
         }
 
         input.setRepoUrl(repoUrl.trim());
-        log.info("Handling repo URL input: '{}'", input.getRepoUrl());
+        log.info("Handling repo URL input for analysis: '{}'", input.getRepoUrl());
 
         sendMessage(chatId, "Checking repository status\\.\\.\\.");
         Optional<String> currentCommitHashOpt = gitInfoService.getRemoteHeadCommitHash(input.getRepoUrl());
         String currentCommitHash = currentCommitHashOpt.orElse("UNKNOWN");
         input.setCommitHash(currentCommitHash);
 
-        Optional<AnalysisHistory> latestHistoryOpt = analysisHistoryRepository
-                .findFirstByAppUserAndRepositoryUrlOrderByAnalyzedAtDesc(appUser, input.getRepoUrl());
+        Optional<AnalysisHistory> latestHistoryOpt = analysisHistoryRepository.findFirstByAppUserAndRepositoryUrlOrderByAnalyzedAtDesc(appUser, input.getRepoUrl());
 
         boolean needsAnalysis = true;
         boolean needsCredentials = true;
@@ -462,7 +441,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                     Path existingSchemaPath = Paths.get(existingSchemaPathStr);
                     if (Files.exists(existingSchemaPath) && Files.isRegularFile(existingSchemaPath)) {
                         needsAnalysis = false;
-                        userQueryContextHistoryId.put(userId, latestHistory.getId());
+                        userQueryContextHistoryId.put(userId, latestHistory.getId()); // Use Telegram userId as key
                         String escapedPath = escapeMarkdownV2(existingSchemaPath.toString());
                         sendMessage(chatId, "✅ This repository version \\(" + escapedValidatedUrl + "\\) was already analyzed\\. Query context set\\.\nSchema available at: `" + escapedPath + "`");
                         userStates.remove(userId);
@@ -495,7 +474,12 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
             log.info("Proceeding with analysis. Reason: {}", reason);
             if (needsCredentials) {
                 userStates.put(userId, UserState.WAITING_FOR_DB_HOST);
-                sendMessage(chatId, "Analysis required\\. Let's get DB credentials for this repository\\.\nEnter DB **hostname** or **IP**:");
+                // Ensure AnalysisInputState exists and has URL/Hash before asking for creds
+                AnalysisInputState currentInput = analysisInputState.computeIfAbsent(userId, k -> new AnalysisInputState());
+                currentInput.setRepoUrl(input.getRepoUrl()); // Make sure URL/Hash are set
+                currentInput.setCommitHash(input.getCommitHash());
+                currentInput.setCredentials(new DbCredentialsInput()); // Initialize creds holder
+                sendMessage(chatId, "Analysis required\\. Please provide DB credentials for `" + escapedValidatedUrl + "`\\.\nEnter DB **hostname** or **IP**:");
             } else {
                 log.info("Proceeding directly to analysis using reused credentials.");
                 performAnalysis(chatId, userId, appUser, input);
@@ -506,14 +490,19 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     }
 
     private void handleCredentialsInput(long chatId, long userId, AppUser appUser, String text, UserState currentState) {
-        AnalysisInputState analysisInput = analysisInputState.get(userId);
-        if (analysisInput == null || analysisInput.getCredentials() == null) {
-            log.error("Input state missing during credential input for user {}, state {}", userId, currentState);
+        DbCredentialsInput credsInputDirect = credentialsInputState.get(userId); // For /set_db_credentials flow
+        AnalysisInputState analysisInputFlow = analysisInputState.get(userId); // For /analyze_repo flow
+        DbCredentialsInput currentCreds = (analysisInputFlow != null && analysisInputFlow.getCredentials() != null) ? analysisInputFlow.getCredentials() : credsInputDirect;
+
+        if (currentCreds == null) {
+            log.error("Input state missing for user {}, state {}", userId, currentState);
             userStates.remove(userId);
+            credentialsInputState.remove(userId);
+            analysisInputState.remove(userId);
             sendMessage(chatId, "Something went wrong\\. Please start again\\.");
             return;
         }
-        DbCredentialsInput currentCreds = analysisInput.getCredentials();
+
         try {
             switch (currentState) {
                 case WAITING_FOR_DB_HOST:
@@ -544,11 +533,12 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                     }
                     currentCreds.setEncryptedPassword(encryptedPasswordOpt.get());
                     log.info("Credentials input complete for user {}.", userId);
-                    if (analysisInput.getRepoUrl() != null) { // If initiated from /analyze_repo flow
+
+                    if (analysisInputFlow != null && analysisInputFlow.getRepoUrl() != null) {
                         log.info("Proceeding to analysis after credential input.");
-                        performAnalysis(chatId, userId, appUser, analysisInput);
-                    } else { // If initiated from /set_db_credentials flow
-                        Optional<AnalysisHistory> historyOpt = analysisHistoryRepository.findFirstByAppUserAndRepositoryUrlOrderByAnalyzedAtDesc(appUser, analysisInput.getRepoUrl());
+                        performAnalysis(chatId, userId, appUser, analysisInputFlow);
+                    } else if (credsInputDirect != null && credsInputDirect.getAssociatedRepoUrl() != null) {
+                        Optional<AnalysisHistory> historyOpt = analysisHistoryRepository.findFirstByAppUserAndRepositoryUrlOrderByAnalyzedAtDesc(appUser, credsInputDirect.getAssociatedRepoUrl());
                         if (historyOpt.isPresent()) {
                             AnalysisHistory history = historyOpt.get();
                             history.setDbHost(currentCreds.getHost());
@@ -558,18 +548,22 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                             history.setDbPasswordEncrypted(currentCreds.getEncryptedPassword());
                             analysisHistoryRepository.save(history);
                             log.info("Updated credentials for existing analysis history ID {}", history.getId());
-                            sendMessage(chatId, "✅ Database credentials updated successfully for `" + escapeMarkdownV2(analysisInput.getRepoUrl()) + "`\\!");
+                            sendMessage(chatId, "✅ Database credentials updated successfully for `" + escapeMarkdownV2(credsInputDirect.getAssociatedRepoUrl()) + "`\\!");
                         } else {
-                            log.warn("Cannot update credentials. No analysis history found for URL: {}", analysisInput.getRepoUrl());
-                            sendMessage(chatId, "⚠️ Could not find a previous analysis for `" + escapeMarkdownV2(analysisInput.getRepoUrl()) + "`\\. Credentials not saved\\. Please run `/analyze_repo` first\\.");
+                            log.warn("Cannot update credentials. No analysis history found for URL: {}", credsInputDirect.getAssociatedRepoUrl());
+                            sendMessage(chatId, "⚠️ Could not find a previous analysis for `" + escapeMarkdownV2(credsInputDirect.getAssociatedRepoUrl()) + "`\\. Credentials not saved\\. Please run `/analyze_repo` first\\.");
                         }
+                    } else {
+                        log.error("Cannot determine flow after password input for user {}", userId);
                     }
                     userStates.remove(userId);
+                    credentialsInputState.remove(userId);
                     analysisInputState.remove(userId);
                     break;
                 default:
                     log.warn("Unexpected state {} during credential input.", currentState);
                     userStates.remove(userId);
+                    credentialsInputState.remove(userId);
                     analysisInputState.remove(userId);
             }
         } catch (NumberFormatException e) {
@@ -577,6 +571,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         } catch (Exception e) {
             log.error("Error processing credential input", e);
             userStates.remove(userId);
+            credentialsInputState.remove(userId);
             analysisInputState.remove(userId);
             sendMessage(chatId, "An error occurred\\. Please try again\\.");
         }
@@ -605,11 +600,9 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
             try {
                 List<AnalysisHistory> oldHistories = analysisHistoryRepository.findByAppUserAndRepositoryUrl(appUser, validatedUrl);
                 oldSchemaPathToDelete = oldHistories.stream().max(Comparator.comparing(AnalysisHistory::getAnalyzedAt)).map(AnalysisHistory::getSchemaFilePath).orElse(null);
-
                 boolean cleanupClone = true;
                 resultSchemaPath = projectAnalyzerService.analyzeAndProcessProject(validatedUrl, appUser.getTelegramId(), cleanupClone);
                 log.info("Analysis successful. Schema path: {}", resultSchemaPath);
-
                 try {
                     AnalysisHistory newHistory = new AnalysisHistory(appUser, validatedUrl, commitHashToSave, resultSchemaPath.toString());
                     newHistory.setDbHost(credentials.getHost());
@@ -619,7 +612,6 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                     newHistory.setDbPasswordEncrypted(credentials.getEncryptedPassword());
                     AnalysisHistory savedHistory = analysisHistoryRepository.save(newHistory);
                     log.info("Saved new analysis history record ID: {}", savedHistory.getId());
-
                     List<AnalysisHistory> recordsToDelete = oldHistories.stream().toList();
                     if (!recordsToDelete.isEmpty()) {
                         analysisHistoryRepository.deleteAll(recordsToDelete);
@@ -636,13 +628,19 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                     }
                     userQueryContextHistoryId.put(userId, savedHistory.getId());
                     String currentEscapedPath = escapeMarkdownV2(resultSchemaPath.toString());
-                    sendMessage(chatId, "✅ Analysis successful\\! Schema saved\\.\nRepository: " + escapedUrl + "\nQuery context set\\.\nUse `/query <your question>`");
-
+                    sendMessage(chatId, "✅ Analysis successful\\! Schema saved\\.\nRepository: " + escapedUrl + "\nQuery context automatically set\\.\nUse `/query <your question>`");
                 } catch (Exception dbEx) {
                     log.error("Failed to save/cleanup analysis results", dbEx);
                     sendMessage(chatId, "⚠️ Analysis done, but failed to save results/cleanup\\.");
                 }
-            } catch (Exception analysisEx) { /* ... Handle analysis error ... */ } finally {
+            } catch (Exception analysisEx) {
+                log.error("Analysis failed for URL {}", validatedUrl, analysisEx);
+                String reason = analysisEx.getMessage();
+                if (analysisEx.getCause() != null) {
+                    reason += " \\(Cause: " + analysisEx.getCause().getMessage() + "\\)";
+                }
+                sendMessage(chatId, "❌ Analysis failed for repository: " + escapedUrl + "\nReason: " + escapeMarkdownV2(reason));
+            } finally {
                 MDC.remove("telegramId");
             }
         });
@@ -660,7 +658,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     }
 
     private void processUserQuery(long chatId, AppUser appUser, String userQuery) {
-        Long targetHistoryId = userQueryContextHistoryId.get(appUser.getId());
+        Long targetHistoryId = userQueryContextHistoryId.get(appUser.getId()); // Use AppUser DB ID for context map key
         Optional<AnalysisHistory> targetHistoryOpt;
         String contextMessage;
 
@@ -695,7 +693,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         try {
             schemaPath = Paths.get(schemaPathStr);
             if (!Files.exists(schemaPath) || !Files.isRegularFile(schemaPath)) {
-                log.error("Schema file not found or invalid: {}", schemaPathStr);
+                log.error("Schema file not found: {}", schemaPathStr);
                 sendMessage(chatId, "Error: The schema file for " + escapedRepoUrlForQuery + " is missing\\. Please run `/analyze_repo` again\\.");
                 return;
             }
@@ -710,6 +708,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         sendMessage(chatId, "🧠 Got it\\! Asking the AI " + contextMessage + " \\(`" + escapeMarkdownV2(commitHash).substring(0, 7) + "`\\)\\.\\.\\.");
 
         final Long finalTargetHistoryId = targetHistoryId;
+        final long currentUserId = appUser.getId(); // Use AppUser DB ID for lastGeneratedSql map key
 
         taskExecutor.submit(() -> {
             MDC.put("telegramId", appUser.getTelegramId());
@@ -719,7 +718,8 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                     String sql = generatedSqlOpt.get();
                     log.info("Generated SQL received for History ID: {}", finalTargetHistoryId);
                     String escapedSql = sql.replace("\\", "\\\\").replace("`", "\\`");
-                    lastGeneratedSql.put(appUser.getId(), finalTargetHistoryId + ":" + sql);
+                    // Use AppUser DB ID (Long) as key for storing SQL
+                    lastGeneratedSql.put(currentUserId, finalTargetHistoryId + ":" + sql);
 
                     InlineKeyboardButton executeButton = InlineKeyboardButton.builder().text("🚀 Execute Query").callbackData("execute_sql:" + finalTargetHistoryId).build();
                     InlineKeyboardMarkup keyboardMarkup = InlineKeyboardMarkup.builder().keyboardRow(List.of(executeButton)).build();
@@ -744,14 +744,15 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     private void handleCallbackQuery(CallbackQuery callbackQuery) {
         String callbackData = callbackQuery.getData();
         long chatId = callbackQuery.getMessage().getChatId();
-        long userId = callbackQuery.getFrom().getId();
+        long userId = callbackQuery.getFrom().getId(); // Telegram User ID (long)
         String telegramIdStr = String.valueOf(userId);
-        String callbackQueryId = callbackQuery.getId(); // ID to answer the callback
+        String callbackQueryId = callbackQuery.getId();
 
         MDC.put("telegramId", telegramIdStr);
+        String answerText = "Processing...";
+
         try {
             log.info("Received callback query data: {}", callbackData);
-            String answerText = null; // Text for the popup notification
 
             if (callbackData != null && callbackData.startsWith("execute_sql:")) {
                 String[] parts = callbackData.split(":", 2);
@@ -771,23 +772,30 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                 }
 
                 AppUser appUser = findOrCreateUser(telegramIdStr);
-                String storedData = lastGeneratedSql.get(userId);
+                if (appUser == null) {
+                    answerText = "Error: User not found";
+                    return;
+                } // Need AppUser to check ownership and get key
+
+                // Get SQL using AppUser DB ID (Long) as key
+                String storedData = lastGeneratedSql.get(appUser.getId());
                 String sqlToExecute = null;
                 if (storedData != null && storedData.startsWith(historyIdToExecute + ":")) {
                     sqlToExecute = storedData.substring(String.valueOf(historyIdToExecute).length() + 1);
                 }
 
-                if (appUser != null && sqlToExecute != null) {
+                if (sqlToExecute != null) {
                     Optional<AnalysisHistory> historyOpt = analysisHistoryRepository.findById(historyIdToExecute);
+                    // Check if history exists AND belongs to the user who clicked the button
                     if (historyOpt.isPresent() && Objects.equals(historyOpt.get().getAppUser().getId(), appUser.getId())) {
                         AnalysisHistory history = historyOpt.get();
                         if (history.hasCredentials()) {
-                            sendMessage(chatId, "🚀 Executing SQL query\\.\\.\\."); // Send separate message
-                            answerText = "Execution started..."; // Text for popup
-                            lastGeneratedSql.remove(userId);
+                            answerText = "Execution started...";
+                            sendMessage(chatId, "🚀 Executing SQL query\\.\\.\\.");
+                            lastGeneratedSql.remove(appUser.getId()); // Remove using AppUser DB ID
 
                             final String finalSql = sqlToExecute;
-                            taskExecutor.submit(() -> { // Execute in background
+                            taskExecutor.submit(() -> {
                                 MDC.put("telegramId", telegramIdStr);
                                 try {
                                     DynamicQueryExecutorService.QueryResult result = queryExecutorService.executeQuery(
@@ -820,32 +828,28 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                         sendMessage(chatId, "❌ Cannot execute: Analysis history not found or invalid\\.");
                     }
                 } else {
-                    answerText = "❌ Error: Query not found!";
-                    sendMessage(chatId, "Error: Could not find user or SQL query to execute\\.");
+                    answerText = "❌ Error: Query expired or invalid!";
+                    sendMessage(chatId, "Error: Could not find the SQL query to execute\\. Please generate it again using `/query`\\.");
                 }
             } else {
                 log.warn("Received unknown callback data: {}", callbackData);
                 answerText = "Unknown action";
             }
 
-            // Answer the callback query to remove the "loading" state on the button
-            AnswerCallbackQuery answer = AnswerCallbackQuery.builder()
-                    .callbackQueryId(callbackQueryId)
-                    .text(answerText) // Optional: show a brief notification
-                    // .showAlert(false) // Set to true to show a popup alert
-                    .build();
+        } catch (Exception e) {
+            log.error("Error processing callback query", e);
+            answerText = "Error processing action";
+        } finally {
+            MDC.remove("telegramId");
+            AnswerCallbackQuery answer = AnswerCallbackQuery.builder().callbackQueryId(callbackQueryId).text(answerText).showAlert(answerText != null && answerText.startsWith("❌ Error:")).build();
             try {
                 execute(answer);
             } catch (TelegramApiException e) {
                 log.error("Failed to answer callback query", e);
             }
-
-        } catch (Exception e) {
-            log.error("Error processing callback query", e);
-        } finally {
-            MDC.remove("telegramId");
         }
     }
+
 
     private void sendMessage(long chatId, String text) {
         SendMessage message = new SendMessage();
@@ -876,24 +880,16 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     }
 
     private enum UserState {
-        IDLE,
-        WAITING_FOR_REPO_URL,
-        WAITING_FOR_LLM_QUERY,
-        WAITING_FOR_REPO_URL_FOR_CREDS, // New state: waiting for repo URL before asking for credentials
-        WAITING_FOR_DB_HOST,
-        WAITING_FOR_DB_PORT,
-        WAITING_FOR_DB_NAME,
-        WAITING_FOR_DB_USER,
-        WAITING_FOR_DB_PASSWORD;
+        IDLE, WAITING_FOR_REPO_URL, WAITING_FOR_LLM_QUERY,
+        WAITING_FOR_REPO_URL_FOR_CREDS,
+        WAITING_FOR_DB_HOST, WAITING_FOR_DB_PORT, WAITING_FOR_DB_NAME,
+        WAITING_FOR_DB_USER, WAITING_FOR_DB_PASSWORD;
 
-        // Helper method to check if current state is for credential input
         public boolean isCredentialInputState() {
-            return this == WAITING_FOR_DB_HOST || this == WAITING_FOR_DB_PORT || this == WAITING_FOR_DB_NAME ||
-                    this == WAITING_FOR_DB_USER || this == WAITING_FOR_DB_PASSWORD;
+            return this == WAITING_FOR_DB_HOST || this == WAITING_FOR_DB_PORT || this == WAITING_FOR_DB_NAME || this == WAITING_FOR_DB_USER || this == WAITING_FOR_DB_PASSWORD;
         }
     }
 
-    // Helper class to store intermediate state during analysis/credential input
     @Data
     private static class AnalysisInputState {
         private String repoUrl;
@@ -901,7 +897,6 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         private DbCredentialsInput credentials;
     }
 
-    // Helper class to store credential parts during input
     @Data
     private static class DbCredentialsInput {
         private String host;
@@ -909,10 +904,10 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         private String name;
         private String username;
         private String encryptedPassword;
+        private String associatedRepoUrl; // Used only for /set_db_credentials flow
 
-        // Factory method to copy credentials from history (used for reusing credentials)
         public static DbCredentialsInput fromHistory(AnalysisHistory h) {
-            if (!h.hasCredentials()) return null; // Return null if history lacks credentials
+            if (!h.hasCredentials()) return null;
             DbCredentialsInput i = new DbCredentialsInput();
             i.host = h.getDbHost();
             i.port = h.getDbPort();
@@ -923,44 +918,27 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         }
     }
 
-    // Helper method to format SELECT results (basic table)
     private void sendSelectResult(long chatId, List<Map<String, Object>> rows) {
         if (rows == null || rows.isEmpty()) {
             sendMessage(chatId, "✅ Query executed successfully, but it returned no rows\\.");
             return;
         }
-
-        StringBuilder resultText = new StringBuilder("✅ Query executed successfully\\. Results" +
-                (rows.size() >= MAX_SELECT_ROWS ? " \\(showing first " + MAX_SELECT_ROWS + " rows\\):" : ":") +
-                "\n\n");
-
-        resultText.append("```\n"); // Start code block
-
+        StringBuilder resultText = new StringBuilder("✅ Query executed successfully\\. Results" + (rows.size() >= MAX_SELECT_ROWS ? " \\(showing first " + MAX_SELECT_ROWS + " rows\\):" : ":") + "\n\n");
+        resultText.append("```\n");
         List<String> headers = new ArrayList<>(rows.getFirst().keySet());
         resultText.append(String.join(" | ", headers)).append("\n");
-        resultText.append(headers.stream().map(h -> "-".repeat(h.length())).collect(Collectors.joining("-|-", "-", "-"))).append("\n"); // Separator line
-
+        resultText.append(headers.stream().map(h -> "-".repeat(Math.max(1, h.length()))).collect(Collectors.joining("-|-", "-", "-"))).append("\n");
         for (Map<String, Object> row : rows) {
-            List<String> values = headers.stream()
-                    .map(row::get)
-                    .map(value -> value != null ? value.toString() : "NULL")
-                    .map(str -> str.length() > 30 ? str.substring(0, 27) + "..." : str) // Truncate long values
-                    .map(str -> str.replace("\n", " ").replace("\r", " ")) // Remove newlines from values
-                    .collect(Collectors.toList());
+            List<String> values = headers.stream().map(header -> row.get(header)).map(value -> value != null ? value.toString() : "NULL").map(str -> str.length() > 30 ? str.substring(0, 27) + "..." : str).map(str -> str.replace("\n", " ").replace("\r", " ")).collect(Collectors.toList());
             resultText.append(String.join(" | ", values)).append("\n");
         }
-
-        resultText.append("```"); // End code block
-
+        resultText.append("```");
         String fullMessage = resultText.toString();
-        int maxLen = 4000; // Keep below Telegram limit (4096) safely
-
+        int maxLen = 4000;
         if (fullMessage.length() <= maxLen) {
-            // Escape the whole message AFTER formatting for MarkdownV2
             sendMessage(chatId, escapeMarkdownV2(fullMessage));
         } else {
             log.warn("Generated SELECT result is too long ({} chars), sending truncated.", fullMessage.length());
-            // Escape only the truncated part
             sendMessage(chatId, escapeMarkdownV2(fullMessage.substring(0, maxLen - 30)) + "\n```\n\\.\\.\\. \\(results truncated\\)");
         }
     }
