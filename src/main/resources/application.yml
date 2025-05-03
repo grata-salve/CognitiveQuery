@@ -58,3 +58,8 @@ google:
       key: ${GEMINI_API_KEY}
       model: gemini-1.5-flash
       base-url: https://generativelanguage.googleapis.com/v1beta
+
+logging:
+  level:
+    com.example.cognitivequery.bot: DEBUG
+    # ... другие настройки ...

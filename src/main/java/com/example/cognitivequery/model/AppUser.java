@@ -33,9 +33,7 @@ public class AppUser {
     private String githubLogin;
 
     private String name;
-
-    private String email; // Email from GitHub (might be null)
-
+    private String email;
     private String avatarUrl;
 
     @Enumerated(EnumType.STRING)
@@ -45,15 +43,6 @@ public class AppUser {
     private LocalDateTime lastLogin;
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
-
-    @Column(length = 1024)
-    private String lastAnalyzedRepoUrl;
-
-    @Column(length = 2048)
-    private String processedSchemaPath; // Renamed: Path to the generated schema JSON file
-
-    @Column(length = 40) // SHA-1 hash is 40 chars
-    private String lastAnalyzedCommitHash;
 
     public AppUser(String telegramId) {
         this.telegramId = telegramId;
@@ -88,14 +77,4 @@ public class AppUser {
         this.lastLogin = LocalDateTime.now();
     }
 
-    public void setAnalysisResults(String repoUrl, String schemaPath, String commitHash) {
-        this.lastAnalyzedRepoUrl = repoUrl;
-        this.processedSchemaPath = schemaPath;
-        this.lastAnalyzedCommitHash = commitHash;
-    }
-
-    public void setAnalysisResults(String repoUrl, String schemaPath) {
-        this.lastAnalyzedRepoUrl = repoUrl;
-        this.processedSchemaPath = schemaPath;
-    }
 }
