@@ -7,18 +7,32 @@ A Spring Boot application providing a Telegram bot for exploring, querying, and 
 ## Features
 
 * **GitHub Integration**: Connect your GitHub account and analyze public repositories to extract database schema.
-* **AI‑Powered SQL Generation**: Use a large language model (Gemini) to convert natural-language questions into SQL queries.
+* **AI-Powered SQL Generation**: Use a large language model (Gemini) to convert natural-language questions into SQL queries.
+* **Optimized Querying via Schema Parsing**: Source code of the analyzed repositories is parsed (using JavaParser and JGit) to extract JPA entity structure. A custom JSON representation of the database schema is built locally, allowing the LLM to generate more accurate and efficient SQL.
 * **Interactive Querying**: Send `/query <your question>` to generate and execute SQL, with support for CSV or TXT exports.
 * **Database Credentials Management**: Securely store and reuse database credentials for query execution.
 * **Scheduled Queries**: Create, list, pause, resume, and delete recurring queries with CRON expressions.
-* **Telegram‑First UX**: Inline buttons for executing generated queries and managing schedules directly in chat.
+* **Telegram-First UX**: Inline buttons for executing generated queries and managing schedules directly in chat.
+
+---
+
+## Tech Stack
+
+* Java 21
+* Spring Boot 3.4.4
+* Maven
+* PostgreSQL
+* TelegramBots 6.9.7.1
+* JGit 6.9.0
+* JavaParser 3.25.10
 
 ---
 
 ## Prerequisites
 
-* Java 17+
+* Java 21+
 * Maven 3.8+
+* Spring Boot 3.4.4
 * PostgreSQL (or your preferred SQL database)
 * A Telegram bot token (via @BotFather)
 * GitHub OAuth App credentials (client ID & secret)
@@ -50,11 +64,10 @@ A Spring Boot application providing a Telegram bot for exploring, querying, and 
        base-url: https://api.yourbackend.com
 
    spring:
-     datasources:
-       default:
-         url: jdbc:postgresql://localhost:5432/cognitive_query_db
-         username: dbuser
-         password: dbpassword
+     datasource:
+       url: jdbc:postgresql://localhost:5432/cognitive_query_db
+       username: dbuser
+       password: dbpassword
    ```
 
 3. **Build the application**
@@ -85,8 +98,8 @@ Interact with your bot in Telegram:
 4. **/list\_schemas** — View repos you’ve analyzed.
 5. **/use\_schema \<repo\_url>** — Set context for future `/query` commands.
 6. **/set\_db\_credentials** — Enter or update credentials for a repo’s database.
-7. **/query \*\*\*\* \[--csv|--txt]** — Ask a natural-language question; receive SQL, then tap “🚀 Execute Query.”
-8. **/schedule\_query** — Create a named, recurring query (CRON‑based).
+7. **/query <question> \[--csv|--txt]** — Ask a natural-language question; receive SQL, then tap “🚀 Execute Query.”
+8. **/schedule\_query** — Create a named, recurring query (CRON-based).
 9. **/list\_scheduled\_queries** — Manage your scheduled jobs (pause, resume, delete).
 10. **/help** — Show the commands menu again.
 
@@ -96,13 +109,13 @@ Interact with your bot in Telegram:
 
 * **CognitiveQueryApplication**: Main Spring Boot entry point; schedules and polling enabled.
 * **Telegram Bot Component**: `CognitiveQueryTelegramBot` extends `TelegramLongPollingBot`, handling updates/events.
-* **Command & Input Handlers**: Modular classes for command parsing (`BotCommandHandler`), callback processing (`BotCallbackHandler`), and multi‑step user flows (`BotInputHandler`).
+* **Command & Input Handlers**: Modular classes for command parsing (`BotCommandHandler`), callback processing (`BotCallbackHandler`), and multi-step user flows (`BotInputHandler`).
 * **State Management**: `BotStateService` tracks each user’s FSM state and temporary inputs.
 * **Persistence**: JPA repositories (`UserRepository`, `AnalysisHistoryRepository`, `ScheduledQueryRepository`) store users, analysis history, and schedules.
 * **Services**:
 
     * **GitInfoService**: Fetches HEAD commit from a GitHub repo.
-    * **ProjectAnalyzerService**: Clones & analyzes code, outputs a JSON schema file.
+    * **ProjectAnalyzerService**: Clones & analyzes code, parses Java files with JavaParser, and builds a JSON schema used for SQL generation.
     * **GeminiService**: Interfaces with an LLM API to generate SQL.
     * **DynamicQueryExecutorService**: Connects to user DB and runs SQL queries.
     * **EncryptionService**: Encrypts database passwords before storage.
