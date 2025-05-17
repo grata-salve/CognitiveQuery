@@ -7,53 +7,48 @@ import lombok.Setter;
 import lombok.ToString;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
 @Entity
 @Table(name = "app_users", uniqueConstraints = {
-        @UniqueConstraint(columnNames = {"telegramId", "provider"}),
+        @UniqueConstraint(columnNames = {"telegramId"}), // Make telegramId unique
         @UniqueConstraint(columnNames = {"githubId", "provider"})
 })
 @Getter
 @Setter
 @NoArgsConstructor
-@ToString
+@ToString(exclude = "analysisHistories") // Avoid infinite loop in toString if bidirectional
 public class AppUser {
 
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false)
+    @Column(nullable = false, unique = true)
     private String telegramId;
 
+    // GitHub related fields
     @Column(unique = true, nullable = true)
     private String githubId;
-
     @Column(nullable = true)
     private String githubLogin;
-
     private String name;
-
-    private String email; // Email from GitHub (might be null)
-
+    private String email;
     private String avatarUrl;
 
     @Enumerated(EnumType.STRING)
     @Column(nullable = false)
     private AuthProvider provider = AuthProvider.TELEGRAM;
 
-    private LocalDateTime lastLogin;
+    private LocalDateTime lastLogin; // Last GitHub login time
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
-    @Column(length = 1024)
-    private String lastAnalyzedRepoUrl;
+    // Relationship to analysis history
+    @OneToMany(mappedBy = "appUser", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
+    private List<AnalysisHistory> analysisHistories = new ArrayList<>();
 
-    @Column(length = 2048)
-    private String processedSchemaPath; // Renamed: Path to the generated schema JSON file
-
-    @Column(length = 40) // SHA-1 hash is 40 chars
-    private String lastAnalyzedCommitHash;
 
     public AppUser(String telegramId) {
         this.telegramId = telegramId;
@@ -86,16 +81,5 @@ public class AppUser {
             this.provider = AuthProvider.GITHUB;
         }
         this.lastLogin = LocalDateTime.now();
-    }
-
-    public void setAnalysisResults(String repoUrl, String schemaPath, String commitHash) {
-        this.lastAnalyzedRepoUrl = repoUrl;
-        this.processedSchemaPath = schemaPath;
-        this.lastAnalyzedCommitHash = commitHash;
-    }
-
-    public void setAnalysisResults(String repoUrl, String schemaPath) {
-        this.lastAnalyzedRepoUrl = repoUrl;
-        this.processedSchemaPath = schemaPath;
     }
 }
