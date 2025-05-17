@@ -24,9 +24,9 @@ public class ScheduledQuery {
     @JoinColumn(name = "app_user_id", nullable = false)
     private AppUser appUser;
 
-    @ManyToOne(fetch = FetchType.LAZY)
+    @ManyToOne(fetch = FetchType.EAGER) // Changed to EAGER to avoid LazyInitializationException in handlers
     @JoinColumn(name = "analysis_history_id", nullable = false)
-    private AnalysisHistory analysisHistory; // Ссылка на конкретный анализ (версию схемы)
+    private AnalysisHistory analysisHistory; // Reference to a specific analysis (schema version)
 
     @Column(nullable = false, columnDefinition = "TEXT")
     private String sqlQuery;
@@ -34,13 +34,13 @@ public class ScheduledQuery {
     @Column(nullable = false, length = 100)
     private String cronExpression;
 
-    @Column(nullable = false) // ID чата, куда слать уведомления/результаты
+    @Column(nullable = false) // Chat ID where notifications/results should be sent
     private Long chatIdToNotify;
 
     @Column(nullable = false, length = 10) // "text", "csv", "txt"
     private String outputFormat;
 
-    @Column(length = 255) // Опциональное имя для расписания
+    @Column(length = 255) // Optional name for the schedule
     private String name;
 
     @Column(nullable = false)
@@ -51,7 +51,7 @@ public class ScheduledQuery {
     private LocalDateTime createdAt;
     private LocalDateTime updatedAt;
 
-    @Column(length = 64) // Для хранения часового пояса пользователя, если понадобится
+    @Column(length = 64) // For storing user's timezone if needed
     private String timezoneId; // e.g., "Europe/Moscow"
 
     public ScheduledQuery(AppUser appUser, AnalysisHistory analysisHistory, String sqlQuery, String cronExpression, Long chatIdToNotify, String outputFormat, String name) {

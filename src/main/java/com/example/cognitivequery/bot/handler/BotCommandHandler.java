@@ -348,25 +348,66 @@ public class BotCommandHandler {
     }
 
     private void handleListScheduledQueriesCommand(long chatId, AppUser appUser, TelegramMessageHelper messageHelper) {
-        List<ScheduledQuery> schedules = scheduledQueryRepository.findByAppUserOrderByCreatedAtDesc(appUser);
+        List<ScheduledQuery> schedules = scheduledQueryRepository.findByAppUserWithHistoryOrderByCreatedAtDesc(appUser);
         if (schedules.isEmpty()) {
             messageHelper.sendMessage(chatId, "You have no scheduled queries\\. Use `/schedule_query` to create one\\.");
             return;
         }
-        StringBuilder sb = new StringBuilder("Your Scheduled Queries:\n");
+
+        messageHelper.sendMessage(chatId, "Your Scheduled Queries \\(tap to manage\\):");
+
         for (ScheduledQuery sq : schedules) {
             String repoUrl = sq.getAnalysisHistory() != null ? sq.getAnalysisHistory().getRepositoryUrl() : "N/A (History Missing!)";
-            sb.append(String.format("ID: `%d` Name: `%s` %s\n  Repo: `%s`\n  CRON: `%s`\n  Next Run: `%s`\n  Output: %s\n\\-\\--\n",
-                    sq.getId(),
+            String scheduleStatus = sq.isEnabled() ? "✅ Active" : "⏸️ Paused";
+
+            String text = String.format(
+                    "*Name:* `%s` \\(%s\\)\n" +
+                            "*ID:* `%d`\n" +
+                            "*Repo:* `%s`\n" +
+                            "*CRON:* `%s`\n" +
+                            "*Next Run:* `%s`\n" +
+                            "*Output:* %s",
                     messageHelper.escapeMarkdownV2(sq.getName() != null ? sq.getName() : "N/A"),
-                    sq.isEnabled() ? "✅" : "⏸️",
+                    scheduleStatus,
+                    sq.getId(),
                     messageHelper.escapeMarkdownV2(repoUrl),
                     messageHelper.escapeMarkdownV2(sq.getCronExpression()),
                     messageHelper.escapeMarkdownV2(sq.getNextExecutionAt() != null ? sq.getNextExecutionAt().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) : "N/A"),
                     messageHelper.escapeMarkdownV2(sq.getOutputFormat())
-            ));
-            // TODO: Add inline buttons for managing each schedule (pause, resume, delete, edit)
+            );
+
+            List<InlineKeyboardButton> rowButtons = new ArrayList<>();
+            if (sq.isEnabled()) {
+                rowButtons.add(InlineKeyboardButton.builder()
+                        .text("⏸️ Pause")
+                        .callbackData("pause_sched:" + sq.getId())
+                        .build());
+            } else {
+                rowButtons.add(InlineKeyboardButton.builder()
+                        .text("▶️ Resume")
+                        .callbackData("resume_sched:" + sq.getId())
+                        .build());
+            }
+            rowButtons.add(InlineKeyboardButton.builder()
+                    .text("❌ Delete")
+                    .callbackData("delete_sched:" + sq.getId())
+                    .build());
+            // Potentially "✏️ Edit" button could be added here in the future
+            // rowButtons.add(InlineKeyboardButton.builder().text("✏️ Edit").callbackData("edit_sched:" + sq.getId()).build());
+
+
+            InlineKeyboardMarkup keyboardMarkup = InlineKeyboardMarkup.builder()
+                    .keyboardRow(rowButtons)
+                    .build();
+
+            SendMessage scheduleMessage = SendMessage.builder()
+                    .chatId(chatId)
+                    .text(text)
+                    .parseMode("MarkdownV2")
+                    .replyMarkup(keyboardMarkup)
+                    .build();
+            messageHelper.tryExecute(scheduleMessage);
         }
-        messageHelper.sendMessage(chatId, sb.toString());
+        messageHelper.sendMessage(chatId, "_Use `/schedule_query` to create a new one\\._");
     }
 }

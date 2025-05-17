@@ -4,12 +4,16 @@ import com.example.cognitivequery.bot.model.ScheduleCreationState;
 import com.example.cognitivequery.bot.service.BotStateService;
 import com.example.cognitivequery.model.AnalysisHistory;
 import com.example.cognitivequery.model.AppUser;
+import com.example.cognitivequery.model.ScheduledQuery;
 import com.example.cognitivequery.repository.AnalysisHistoryRepository;
+import com.example.cognitivequery.repository.ScheduledQueryRepository;
 import com.example.cognitivequery.service.db.DynamicQueryExecutorService;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Service;
 import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
 
+import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -23,16 +27,19 @@ public class BotCallbackHandler {
     private final BotStateService botStateService;
     private final AnalysisHistoryRepository analysisHistoryRepository;
     private final DynamicQueryExecutorService queryExecutorService;
-    private final BotInputHandler botInputHandler; // For schedule creation steps
+    private final BotInputHandler botInputHandler;
+    private final ScheduledQueryRepository scheduledQueryRepository;
 
     public BotCallbackHandler(BotStateService botStateService,
                               AnalysisHistoryRepository analysisHistoryRepository,
                               DynamicQueryExecutorService queryExecutorService,
-                              BotInputHandler botInputHandler) {
+                              BotInputHandler botInputHandler,
+                              ScheduledQueryRepository scheduledQueryRepository) {
         this.botStateService = botStateService;
         this.analysisHistoryRepository = analysisHistoryRepository;
         this.queryExecutorService = queryExecutorService;
         this.botInputHandler = botInputHandler;
+        this.scheduledQueryRepository = scheduledQueryRepository;
     }
 
     public void handle(CallbackQuery callbackQuery, AppUser appUser,
@@ -57,7 +64,7 @@ public class BotCallbackHandler {
 
             if (callbackData.startsWith("execute_sql:")) {
                 handleExecuteSqlCallback(callbackQuery, appUser, chatId, userId, callbackData, messageHelper, taskExecutor);
-                answerText = "Execution initiated..."; // Toast for UI, actual message in chat
+                answerText = "Execution initiated...";
             } else if (callbackData.startsWith("sched_hist:")) {
                 answerText = "History selected.";
                 String historyIdStrCallback = callbackData.substring("sched_hist:".length());
@@ -88,9 +95,16 @@ public class BotCallbackHandler {
                     showAlert = true;
                     messageHelper.sendMessage(chatId, "Session for creating schedule has expired. Please start over with `/schedule_query`");
                 }
+            } else if (callbackData.startsWith("pause_sched:")) {
+                answerText = handlePauseSchedule(callbackData, appUser, chatId, messageHelper);
+                showAlert = answerText.startsWith("Error:");
+            } else if (callbackData.startsWith("resume_sched:")) {
+                answerText = handleResumeSchedule(callbackData, appUser, chatId, messageHelper);
+                showAlert = answerText.startsWith("Error:");
+            } else if (callbackData.startsWith("delete_sched:")) {
+                answerText = handleDeleteSchedule(callbackData, appUser, chatId, messageHelper);
+                showAlert = answerText.startsWith("Error:");
             }
-            // TODO: Add handlers for schedule management buttons (pause_sched, resume_sched, delete_sched)
-            // else if (callbackData.startsWith("pause_sched:")) { ... }
             else {
                 log.warn("Received unknown callback data: {}", callbackData);
                 answerText = "Unknown action";
@@ -102,6 +116,93 @@ public class BotCallbackHandler {
             showAlert = true;
         } finally {
             messageHelper.sendAnswerCallbackQuery(callbackQueryId, answerText, showAlert);
+        }
+    }
+
+    private String handlePauseSchedule(String callbackData, AppUser appUser, long chatId, TelegramMessageHelper messageHelper) {
+        try {
+            long scheduleId = Long.parseLong(callbackData.substring("pause_sched:".length()));
+            Optional<ScheduledQuery> sqOpt = scheduledQueryRepository.findById(scheduleId);
+
+            if (sqOpt.isEmpty() || !Objects.equals(sqOpt.get().getAppUser().getId(), appUser.getId())) {
+                messageHelper.sendMessage(chatId, "Error: Schedule not found or you don't have permission.");
+                return "Error: Invalid schedule ID.";
+            }
+            ScheduledQuery sq = sqOpt.get();
+            if (!sq.isEnabled()) {
+                return "Already paused.";
+            }
+            sq.setEnabled(false);
+            scheduledQueryRepository.save(sq);
+            // Corrected message with escaped parentheses
+            messageHelper.sendMessage(chatId, "✅ Scheduled query `" + messageHelper.escapeMarkdownV2(sq.getName()) + "` \\(ID: " + sq.getId() + "\\) has been paused\\.");
+            return "Paused.";
+        } catch (NumberFormatException e) {
+            log.error("Invalid schedule ID format in callback: {}", callbackData, e);
+            return "Error: Invalid ID format.";
+        } catch (Exception e) {
+            log.error("Error pausing schedule: {}", callbackData, e);
+            return "Error: Could not pause.";
+        }
+    }
+
+    private String handleResumeSchedule(String callbackData, AppUser appUser, long chatId, TelegramMessageHelper messageHelper) {
+        try {
+            long scheduleId = Long.parseLong(callbackData.substring("resume_sched:".length()));
+            Optional<ScheduledQuery> sqOpt = scheduledQueryRepository.findById(scheduleId);
+
+            if (sqOpt.isEmpty() || !Objects.equals(sqOpt.get().getAppUser().getId(), appUser.getId())) {
+                messageHelper.sendMessage(chatId, "Error: Schedule not found or you don't have permission.");
+                return "Error: Invalid schedule ID.";
+            }
+            ScheduledQuery sq = sqOpt.get();
+            if (sq.isEnabled()) {
+                return "Already active.";
+            }
+            sq.setEnabled(true);
+            try {
+                CronExpression cron = CronExpression.parse(sq.getCronExpression());
+                LocalDateTime nextExecution = cron.next(LocalDateTime.now());
+                sq.setNextExecutionAt(nextExecution);
+                log.info("Resuming schedule ID {}. Next execution set to: {}", sq.getId(), nextExecution);
+            } catch (IllegalArgumentException e) {
+                log.error("Invalid CRON expression for schedule ID {} during resume: {}. Cannot set next execution.", sq.getId(), sq.getCronExpression(), e);
+                messageHelper.sendMessage(chatId, "⚠️ Schedule resumed, but there was an issue recalculating next run due to CRON: " + messageHelper.escapeMarkdownV2(e.getMessage()));
+            }
+            scheduledQueryRepository.save(sq);
+            // Corrected message with escaped parentheses and potentially for next run time
+            String nextRunTime = sq.getNextExecutionAt() != null ? messageHelper.escapeMarkdownV2(sq.getNextExecutionAt().toString()) : "ASAP";
+            messageHelper.sendMessage(chatId, "▶️ Scheduled query `" + messageHelper.escapeMarkdownV2(sq.getName()) + "` \\(ID: " + sq.getId() + "\\) has been resumed\\. Next run: `" + nextRunTime + "`");
+            return "Resumed.";
+        } catch (NumberFormatException e) {
+            log.error("Invalid schedule ID format in callback: {}", callbackData, e);
+            return "Error: Invalid ID format.";
+        } catch (Exception e) {
+            log.error("Error resuming schedule: {}", callbackData, e);
+            return "Error: Could not resume.";
+        }
+    }
+
+    private String handleDeleteSchedule(String callbackData, AppUser appUser, long chatId, TelegramMessageHelper messageHelper) {
+        try {
+            long scheduleId = Long.parseLong(callbackData.substring("delete_sched:".length()));
+            Optional<ScheduledQuery> sqOpt = scheduledQueryRepository.findById(scheduleId);
+
+            if (sqOpt.isEmpty() || !Objects.equals(sqOpt.get().getAppUser().getId(), appUser.getId())) {
+                messageHelper.sendMessage(chatId, "Error: Schedule not found or you don't have permission.");
+                return "Error: Invalid schedule ID.";
+            }
+            ScheduledQuery sq = sqOpt.get();
+            scheduledQueryRepository.deleteById(scheduleId);
+            // Corrected message with escaped parentheses
+            messageHelper.sendMessage(chatId, "🗑️ Scheduled query `" + messageHelper.escapeMarkdownV2(sq.getName()) + "` \\(ID: " + sq.getId() + "\\) has been deleted\\.");
+            return "Deleted.";
+        } catch (NumberFormatException e) {
+            log.error("Invalid schedule ID format in callback: {}", callbackData, e);
+            return "Error: Invalid ID format.";
+        } catch (Exception e) {
+            log.error("Error deleting schedule: {}", callbackData, e);
+            return "Error: Could not delete.";
         }
     }
 
@@ -121,7 +222,7 @@ public class BotCallbackHandler {
             messageHelper.sendAnswerCallbackQuery(callbackQuery.getId(), "Error: Invalid History ID", true);
             return;
         }
-        String format = parts[2]; // "text", "csv", or "txt"
+        String format = parts[2];
 
         String storedData = botStateService.getLastGeneratedSql(userId);
         String sqlToExecute = null;
@@ -149,10 +250,9 @@ public class BotCallbackHandler {
             return;
         }
 
-        // Acknowledge callback before starting long task
         messageHelper.sendAnswerCallbackQuery(callbackQuery.getId(), "Execution started...", false);
         messageHelper.sendMessage(chatId, "🚀 Executing SQL query\\.\\.\\.");
-        botStateService.clearLastGeneratedSql(userId); // SQL is being used
+        botStateService.clearLastGeneratedSql(userId);
 
         final String finalSql = sqlToExecute;
         final String finalFormat = format;
@@ -175,7 +275,7 @@ public class BotCallbackHandler {
                             messageHelper.sendSelectResultAsCsvFile(chatId, resultData, repoUrlForFile);
                         } else if ("txt".equals(finalFormat)) {
                             messageHelper.sendSelectResultAsTxtFile(chatId, resultData, repoUrlForFile);
-                        } else { // Default "text"
+                        } else {
                             messageHelper.sendSelectResultAsTextInChat(chatId, resultData, repoUrlForFile);
                         }
                     } else if (result.type() == DynamicQueryExecutorService.QueryType.UPDATE) {

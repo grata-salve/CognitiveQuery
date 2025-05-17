@@ -74,7 +74,7 @@ public class BotInputHandler {
                 handleRepoUrlInput(chatId, userId, appUser, text, messageHelper, taskExecutor);
                 return true;
             case WAITING_FOR_REPO_URL_FOR_CREDS:
-                // Для WAITING_FOR_REPO_URL_FOR_CREDS не нужен taskExecutor, т.к. анализ не запускается
+                // WAITING_FOR_REPO_URL_FOR_CREDS does not need taskExecutor as analysis is not run
                 handleRepoUrlForCredsInput(chatId, userId, text, messageHelper);
                 return true;
             case WAITING_FOR_LLM_QUERY:
@@ -87,7 +87,7 @@ public class BotInputHandler {
         }
     }
 
-    // ИСПРАВЛЕНИЕ: Добавлен ExecutorService taskExecutor как параметр
+    // FIX: Added ExecutorService taskExecutor as a parameter
     public boolean processCredentialsInput(Message message, AppUser appUser, UserState currentState,
                                            TelegramMessageHelper messageHelper, ExecutorService taskExecutor) {
         long chatId = message.getChatId();
@@ -115,7 +115,7 @@ public class BotInputHandler {
                     botStateService.setUserState(userId, UserState.WAITING_FOR_DB_PORT);
                     messageHelper.sendMessage(chatId, "Got it\\. DB **port** \\(e\\.g\\., `5432`\\):");
                     break;
-                // ... другие case для WAITING_FOR_DB_PORT, WAITING_FOR_DB_NAME, WAITING_FOR_DB_USER ...
+                // ... other cases for WAITING_FOR_DB_PORT, WAITING_FOR_DB_NAME, WAITING_FOR_DB_USER ...
                 case WAITING_FOR_DB_PORT:
                     currentCreds.setPort(Integer.parseInt(text.trim()));
                     botStateService.setUserState(userId, UserState.WAITING_FOR_DB_NAME);
@@ -136,17 +136,17 @@ public class BotInputHandler {
                     Optional<String> encryptedPasswordOpt = encryptionService.encrypt(plainPassword);
                     if (encryptedPasswordOpt.isEmpty()) {
                         messageHelper.sendMessage(chatId, "Error encrypting password. Please try again or contact support.");
-                        // Не сбрасываем состояние, чтобы пользователь мог попробовать снова или админ увидел ошибку.
-                        // Или сбросить, чтобы не застрял? Зависит от политики. Пока оставим.
+                        // Don't reset state, so user can try again or admin sees the error.
+                        // Or reset to avoid getting stuck? Depends on policy. Keep for now.
                         log.error("Failed to encrypt password for user {}", userId);
-                        return true; // Ошибка обработана, но не успешно
+                        return true; // Error handled, but not successfully
                     }
                     currentCreds.setEncryptedPassword(encryptedPasswordOpt.get());
                     log.info("Credentials input complete for user {}.", userId);
 
                     if (analysisInputFlow != null && analysisInputFlow.getRepoUrl() != null) {
                         log.info("Proceeding to analysis after credential input for /analyze_repo flow for user {}", userId);
-                        // ИСПРАВЛЕНИЕ: Передаем taskExecutor
+                        // FIX: Pass taskExecutor
                         performAnalysis(chatId, userId, appUser, analysisInputFlow, messageHelper, taskExecutor);
                     } else if (credsInputDirect != null && credsInputDirect.getAssociatedRepoUrl() != null) {
                         log.info("Processing credentials for /set_db_credentials flow for user {}", userId);
@@ -169,7 +169,7 @@ public class BotInputHandler {
                         log.error("Cannot determine flow after password input for user {}. No active analysis or direct credential setting flow.", userId);
                         messageHelper.sendMessage(chatId, "An internal error occurred determining the next step\\. Please try again\\.");
                     }
-                    botStateService.clearAllUserStates(userId); // Сбрасываем все состояния после успешного ввода или определения потока
+                    botStateService.clearAllUserStates(userId); // Reset all states after successful input or flow determination
                     break;
                 default:
                     log.warn("Unexpected state {} during credential input for user {}.", currentState, userId);
@@ -178,10 +178,10 @@ public class BotInputHandler {
             }
         } catch (NumberFormatException e) {
             messageHelper.sendMessage(chatId, "Invalid port number\\. Please enter a valid number\\.");
-            // Не сбрасываем состояние, чтобы пользователь мог исправить ввод порта
+            // Don't reset state, so user can correct port input
         } catch (Exception e) {
             log.error("Error processing credential input for user {}", userId, e);
-            botStateService.clearAllUserStates(userId); // Сбрасываем при общей ошибке
+            botStateService.clearAllUserStates(userId); // Reset on general error
             messageHelper.sendMessage(chatId, "An error occurred during credential input: " + messageHelper.escapeMarkdownV2(e.getMessage()) + "\\. Please try again\\.");
         }
         return true;
@@ -206,7 +206,7 @@ public class BotInputHandler {
         AnalysisInputState input = botStateService.getAnalysisInputState(userId);
         if (input == null) {
             log.error("AnalysisInputState missing for user {} during repo URL input.", userId);
-            botStateService.clearUserState(userId); // Сбрасываем состояние пользователя, т.к. input state потерян
+            botStateService.clearUserState(userId); // Reset user state as input state is lost
             messageHelper.sendMessage(chatId, "An internal error occurred with the analysis session\\. Please try starting the analysis again with `/analyze_repo`\\.");
             return;
         }
@@ -214,7 +214,7 @@ public class BotInputHandler {
         Matcher matcher = CognitiveQueryTelegramBot.GITHUB_URL_PATTERN.matcher(repoUrl.trim());
         if (!matcher.matches()) {
             messageHelper.sendMessage(chatId, "Invalid GitHub URL format\\. Please enter a valid GitHub repository URL \\(e\\.g\\., `https://github.com/owner/repo`\\)\\.");
-            return; // Остаемся в состоянии WAITING_FOR_REPO_URL
+            return; // Remain in WAITING_FOR_REPO_URL state
         }
 
         input.setRepoUrl(repoUrl.trim());
@@ -222,8 +222,6 @@ public class BotInputHandler {
 
         messageHelper.sendMessage(chatId, "Checking repository status\\.\\.\\.");
         Optional<String> currentCommitHashOpt = gitInfoService.getRemoteHeadCommitHash(input.getRepoUrl());
-        // ... (остальная логика handleRepoUrlInput без изменений до вызова performAnalysis) ...
-        // Примерно так:
         String currentCommitHash = currentCommitHashOpt.orElse("UNKNOWN_COMMIT");
         input.setCommitHash(currentCommitHash);
 
@@ -293,34 +291,34 @@ public class BotInputHandler {
             } else {
                 log.info("Proceeding directly to analysis for {} by user {} using reused credentials.", input.getRepoUrl(), userId);
                 performAnalysis(chatId, userId, appUser, input, messageHelper, taskExecutor);
-                // Состояние сбросится внутри performAnalysis или после его завершения, если это синхронно,
-                // но т.к. performAnalysis асинхронный, сброс состояний из него может быть неверным.
-                // Правильнее, если performAnalysis просто выполняет свою работу.
-                // Сброс состояний WAITING_FOR_REPO_URL должен произойти здесь, т.к. мы перешли к следующему шагу (анализ или запрос кредов).
-                // Однако, если нужны креды, мы переходим в WAITING_FOR_DB_HOST, так что не сбрасываем всё.
-                // Если сразу анализ - то после performAnalysis (в его callback или Future) или если performAnalysis не кидает ошибок,
-                // то можно условно сбросить здесь, но это рискованно.
-                // Пока оставим сброс состояний в конце ветки "needsAnalysis == false" или в конце ввода кредов.
-                // Здесь, если needsCredentials == false, то performAnalysis запускается, и мы ожидаем, что он завершится.
-                // Сбрасывать userState и analysisInputState здесь может быть преждевременно, если performAnalysis еще не отработал.
-                // НО! Мы уже отправили "Starting analysis...". Пользователь не должен больше ничего вводить для этого потока.
-                // Поэтому, после запуска performAnalysis, текущий UserState.WAITING_FOR_REPO_URL можно считать завершенным.
-                botStateService.clearUserState(userId); // Пользователь больше не в WAITING_FOR_REPO_URL
-                botStateService.clearAnalysisInputState(userId); // Данные для этого конкретного анализа переданы
+                // State will be reset inside performAnalysis or after its completion if synchronous.
+                // Since performAnalysis is asynchronous, resetting states from it might be incorrect.
+                // Better if performAnalysis just does its job.
+                // Resetting WAITING_FOR_REPO_URL states should happen here, as we moved to the next step (analysis or credential request).
+                // However, if credentials are needed, we move to WAITING_FOR_DB_HOST, so don't reset everything.
+                // If direct analysis - after performAnalysis (in its callback or Future) or if performAnalysis doesn't throw errors,
+                // then it could be conditionally reset here, but it's risky.
+                // Keep state reset at the end of "needsAnalysis == false" branch or at the end of credential input.
+                // Here, if needsCredentials == false, performAnalysis is launched, and we expect it to complete.
+                // Resetting userState and analysisInputState here might be premature if performAnalysis hasn't finished.
+                // BUT! We already sent "Starting analysis...". The user shouldn't input anything else for this flow.
+                // Therefore, after launching performAnalysis, the current UserState.WAITING_FOR_REPO_URL can be considered completed.
+                botStateService.clearUserState(userId); // User is no longer in WAITING_FOR_REPO_URL
+                botStateService.clearAnalysisInputState(userId); // Data for this specific analysis has been passed
             }
         }
-        // Если needsAnalysis == false, состояния уже были сброшены выше.
+        // If needsAnalysis == false, states were already reset above.
     }
 
 
     private void performAnalysis(long chatId, long userId, AppUser appUser, AnalysisInputState input,
                                  TelegramMessageHelper messageHelper, ExecutorService taskExecutor) {
-        // ИСПРАВЛЕНИЕ: Проверка taskExecutor и логирование
+        // FIX: Check taskExecutor and log
         if (taskExecutor == null) {
             log.error("CRITICAL: TaskExecutor is NULL in performAnalysis for user {}. Analysis cannot proceed asynchronously. This is a bug in passing the executor.", userId);
             messageHelper.sendMessage(chatId, "❌ A critical internal error occurred (executor missing)\\. Analysis cannot start\\. Please contact support\\.");
-            // Важно: нужно как-то обработать эту ситуацию. Нельзя просто продолжать.
-            // Можно сбросить состояния, чтобы пользователь не застрял.
+            // Important: need to handle this situation. Cannot just continue.
+            // Can reset states so user doesn't get stuck.
             botStateService.clearAllUserStates(userId);
             return;
         }
@@ -343,9 +341,9 @@ public class BotInputHandler {
         messageHelper.sendMessage(chatId, "⏳ Starting analysis for " + escapedUrl + versionPart + "\\.\\.\\. This may take a while\\.");
 
         Runnable analysisTask = () -> {
-            String originalTelegramId = appUser.getTelegramId(); // Для MDC внутри потока
+            String originalTelegramId = appUser.getTelegramId(); // For MDC within the thread
             org.slf4j.MDC.put("telegramId", originalTelegramId);
-            org.slf4j.MDC.put("userId", String.valueOf(userId)); // Для логов
+            org.slf4j.MDC.put("userId", String.valueOf(userId)); // For logs
             org.slf4j.MDC.put("repoUrl", validatedUrl);
 
             Path resultSchemaPath = null;
@@ -411,20 +409,6 @@ public class BotInputHandler {
         taskExecutor.submit(analysisTask);
     }
 
-
-    // --- Schedule Creation Input Handling ---
-    // ... (остальная часть BotInputHandler без изменений, если они не затрагивают performAnalysis) ...
-    // Код для processScheduleCreationInput и его вспомогательных методов остается как был,
-    // если только performAnalysis не вызывался оттуда (а он не вызывался).
-    // ... (handleScheduleNameInput, handleScheduleHistoryIdInput, etc.) ...
-    // Убедитесь, что методы saveScheduledQuery и другие вспомогательные методы для расписаний
-    // корректно сбрасывают состояния через botStateService.clearAllUserStates(userId) в нужных местах
-    // (обычно по завершении потока или при ошибке, которую нельзя исправить).
-
-    // ВАЖНО: Убедитесь, что все методы, вызывающие performAnalysis, передают ему не-null taskExecutor.
-    // Сейчас это handleRepoUrlInput и processCredentialsInput.
-
-    // --- Schedule Creation Input Handling (копипаст из предыдущего ответа, для полноты файла) ---
     public boolean processScheduleCreationInput(Message message, AppUser appUser, UserState currentState,
                                                 TelegramMessageHelper messageHelper, ExecutorService taskExecutor) {
         long chatId = message.getChatId();
@@ -434,7 +418,7 @@ public class BotInputHandler {
         ScheduleCreationState state = botStateService.getScheduleCreationState(userId);
         if (state == null) {
             messageHelper.sendMessage(chatId, "Error: Schedule creation process not found\\. Please start again with `/schedule_query`\\.");
-            botStateService.clearUserState(userId); // Сбрасываем только UserState, т.к. ScheduleCreationState уже null
+            botStateService.clearUserState(userId); // Reset only UserState, as ScheduleCreationState is already null
             return true;
         }
 
@@ -506,7 +490,7 @@ public class BotInputHandler {
                     if (parts.length >= 2) {
                         repoUrlDisplayName = parts[parts.length - 2] + "/" + parts[parts.length - 1];
                     }
-                } catch (Exception e) { /* use full URL */ }
+                } catch (Exception e) { /* use full URL if split fails */ }
                 repoUrlDisplayName = repoUrlDisplayName.length() > 35 ? "..." + repoUrlDisplayName.substring(repoUrlDisplayName.length() - 32) : repoUrlDisplayName;
                 String buttonText = String.format("ID %d: %s (%.7s)", h.getId(), repoUrlDisplayName, h.getCommitHash());
                 buttonText = buttonText.length() > 60 ? buttonText.substring(0, 57) + "..." : buttonText;
@@ -643,14 +627,14 @@ public class BotInputHandler {
             messageHelper.sendMessage(chatId, "✅ Scheduled query '" + messageHelper.escapeMarkdownV2(state.getName()) + "' created successfully\\! Next execution: `" + messageHelper.escapeMarkdownV2(nextExecution.toString()) + "`");
         } catch (IllegalArgumentException e) {
             messageHelper.sendMessage(chatId, "❌ Invalid CRON expression: `" + messageHelper.escapeMarkdownV2(state.getCronExpression()) + "`\\. " + messageHelper.escapeMarkdownV2(e.getMessage()) + "\\. Please try again\\.");
-            botStateService.setUserState(userId, UserState.WAITING_FOR_SCHEDULE_CRON); // Возвращаем на шаг CRON
-            // Не очищаем ScheduleCreationState, чтобы пользователь мог исправить только CRON
+            botStateService.setUserState(userId, UserState.WAITING_FOR_SCHEDULE_CRON); // Return to CRON step
+            // Don't clear ScheduleCreationState, so user can fix only CRON
             messageHelper.sendMessage(chatId, "Please re\\-enter the CRON expression:");
             return;
         } catch (Exception e) {
             log.error("Error saving scheduled query for user {}", userId, e);
             messageHelper.sendMessage(chatId, "❌ An error occurred while saving the scheduled query: " + messageHelper.escapeMarkdownV2(e.getMessage()) + "\\. Please try again\\.");
-            // При общей ошибке сбрасываем все состояния, т.к. непонятно, что пошло не так
+            // On general error, reset all states as it's unclear what went wrong
         }
         botStateService.clearAllUserStates(userId);
     }

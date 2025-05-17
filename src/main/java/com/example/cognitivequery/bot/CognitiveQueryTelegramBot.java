@@ -6,12 +6,12 @@ import com.example.cognitivequery.bot.handler.BotInputHandler;
 import com.example.cognitivequery.bot.handler.TelegramMessageHelper;
 import com.example.cognitivequery.bot.model.UserState;
 import com.example.cognitivequery.bot.service.BotStateService;
-import com.example.cognitivequery.model.AppUser; // Убедитесь, что это ваш AppUser
-import com.example.cognitivequery.repository.AnalysisHistoryRepository; // Если используется напрямую
+import com.example.cognitivequery.model.AppUser;
 import com.example.cognitivequery.repository.UserRepository;
 import com.example.cognitivequery.service.ScheduledQueryExecutionService;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
@@ -40,13 +40,12 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
 
     private final String botUsername;
     private final UserRepository userRepository;
-    // AnalysisHistoryRepository может понадобиться, если findOrCreateUser его использует или другие прямые вызовы
-    // private final AnalysisHistoryRepository analysisHistoryRepository;
 
     private final BotStateService botStateService;
     private final BotCommandHandler botCommandHandler;
     private final BotInputHandler botInputHandler;
     private final BotCallbackHandler botCallbackHandler;
+    @Getter
     private final TelegramMessageHelper messageHelper;
     private final ScheduledQueryExecutionService scheduledQueryExecutionService;
 
@@ -63,7 +62,6 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
             @Value("${telegram.bot.token}") String botToken,
             @Value("${telegram.bot.username}") String botUsername,
             UserRepository userRepository,
-            // AnalysisHistoryRepository analysisHistoryRepository, // Раскомментировать, если используется напрямую
             BotStateService botStateService,
             BotCommandHandler botCommandHandler,
             BotInputHandler botInputHandler,
@@ -73,12 +71,11 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         super(botToken);
         this.botUsername = botUsername;
         this.userRepository = userRepository;
-        // this.analysisHistoryRepository = analysisHistoryRepository; // Раскомментировать, если используется напрямую
         this.botStateService = botStateService;
         this.botCommandHandler = botCommandHandler;
         this.botInputHandler = botInputHandler;
         this.botCallbackHandler = botCallbackHandler;
-        this.messageHelper = new TelegramMessageHelper(this); // Важно: this передается для метода execute
+        this.messageHelper = new TelegramMessageHelper(this); // Important: 'this' is passed for the execute method
         this.scheduledQueryExecutionService = scheduledQueryExecutionService;
         log.info("Telegram Bot initialized. Username: {}", botUsername);
     }
@@ -148,7 +145,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                     messageHelper.sendAnswerCallbackQuery(callbackQuery.getId(), "User data error.", true);
                     return;
                 }
-                // Передаем taskExecutor в обработчик колбэков, если он там нужен для асинхронных операций
+                // Pass taskExecutor to the callback handler if needed for asynchronous operations
                 botCallbackHandler.handle(callbackQuery, appUser, messageHelper, taskExecutor);
             } catch (Exception e) {
                 log.error("Unhandled exception during callback query processing: " + callbackQuery.getData(), e);
@@ -176,7 +173,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                     messageHelper.sendMessage(chatId, "Sorry, there was a problem accessing user data\\. Please try again later\\.");
                     return;
                 }
-                // Используем ID из нашего AppUser для состояний, т.к. он может быть PK в нашей БД
+                // Use the ID from our AppUser for states, as it might be the PK in our DB
                 long internalUserId = appUser.getId();
 
 
@@ -205,7 +202,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                     if (currentState.isScheduleCreationState()) {
                         processed = botInputHandler.processScheduleCreationInput(message, appUser, currentState, messageHelper, taskExecutor);
                     } else if (currentState.isCredentialInputState()) {
-                        // ИСПРАВЛЕНИЕ: передаем taskExecutor
+                        // FIX: pass taskExecutor
                         processed = botInputHandler.processCredentialsInput(message, appUser, currentState, messageHelper, taskExecutor);
                     } else {
                         processed = botInputHandler.processGeneralInput(message, appUser, currentState, messageHelper, taskExecutor);
@@ -220,7 +217,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                     String command = parts[0].toLowerCase();
                     String commandArgs = parts.length > 1 ? parts[1].trim() : "";
 
-                    // Передаем taskExecutor в обработчик команд, если он там нужен
+                    // Pass taskExecutor to the command handler if needed there
                     botCommandHandler.handle(message, appUser, command, commandArgs, userFirstName, messageHelper, taskExecutor);
                     processed = true;
                 }
@@ -245,7 +242,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
             return userRepository.findByTelegramId(telegramIdStr).orElseGet(() -> {
                 log.info("User not found, creating new for Telegram ID: {}", telegramIdStr);
                 AppUser newUser = new AppUser(telegramIdStr);
-                // Если AppUser должен иметь githubId по умолчанию или другие поля, установите их здесь
+                // If AppUser should have a default githubId or other fields, set them here
                 return userRepository.save(newUser);
             });
         } catch (Exception e) {
@@ -254,7 +251,4 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         }
     }
 
-    public TelegramMessageHelper getMessageHelper() {
-        return messageHelper;
-    }
 }
