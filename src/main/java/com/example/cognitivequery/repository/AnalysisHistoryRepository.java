@@ -25,4 +25,6 @@ public interface AnalysisHistoryRepository extends JpaRepository<AnalysisHistory
 
     // Find all entries for a user (for /list_schemas)
     List<AnalysisHistory> findByAppUserOrderByAnalyzedAtDesc(AppUser appUser);
+
+    Optional<AnalysisHistory> findByIdAndAppUser(Long id, AppUser appUser);
 }

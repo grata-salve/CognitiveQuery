@@ -2,8 +2,11 @@ package com.example.cognitivequery.bot;
 
 import com.example.cognitivequery.model.AnalysisHistory;
 import com.example.cognitivequery.model.AppUser;
+import com.example.cognitivequery.model.ScheduledQuery;
 import com.example.cognitivequery.repository.AnalysisHistoryRepository;
+import com.example.cognitivequery.repository.ScheduledQueryRepository;
 import com.example.cognitivequery.repository.UserRepository;
+import com.example.cognitivequery.service.ScheduledQueryExecutionService;
 import com.example.cognitivequery.service.db.DynamicQueryExecutorService;
 import com.example.cognitivequery.service.llm.GeminiService;
 import com.example.cognitivequery.service.projectextractor.GitInfoService;
@@ -17,6 +20,7 @@ import org.slf4j.MDC;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.MediaType;
+import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import org.telegram.telegrambots.bots.TelegramLongPollingBot;
@@ -41,6 +45,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
@@ -82,6 +87,9 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     private static final String CSV_FLAG = "--csv";
     private static final String TXT_FLAG = "--txt";
 
+    private final ScheduledQueryRepository scheduledQueryRepository; // НОВЫЙ
+    private final ScheduledQueryExecutionService scheduledQueryExecutionService; // НОВЫЙ
+
     private final ExecutorService taskExecutor = Executors.newCachedThreadPool();
 
     public CognitiveQueryTelegramBot(
@@ -95,7 +103,9 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
             AnalysisHistoryRepository analysisHistoryRepository,
             EncryptionService encryptionService,
             DynamicQueryExecutorService queryExecutorService,
-            WebClient.Builder webClientBuilder
+            WebClient.Builder webClientBuilder,
+            ScheduledQueryRepository scheduledQueryRepository, // НОВЫЙ
+            ScheduledQueryExecutionService scheduledQueryExecutionService // НОВЫЙ
     ) {
         super(botToken);
         this.botUsername = botUsername;
@@ -108,6 +118,9 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         this.queryExecutorService = queryExecutorService;
         this.webClient = webClientBuilder.baseUrl(backendApiBaseUrl).build();
         log.info("Telegram Bot initialized. Username: {}, Backend API: {}", botUsername, backendApiBaseUrl);
+        this.scheduledQueryRepository = scheduledQueryRepository; // НОВЫЙ
+        this.scheduledQueryExecutionService = scheduledQueryExecutionService; // НОВЫЙ
+        this.scheduledQueryExecutionService.setTelegramBot(this); // Передаем ссылку на бота в сервис
     }
 
     @PreDestroy
@@ -147,6 +160,8 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         commands.add(new BotCommand("use_schema", "Set context for /query by URL"));
         commands.add(new BotCommand("set_db_credentials", "Set DB credentials for a repo"));
         commands.add(new BotCommand("help", "Show available commands"));
+        commands.add(new BotCommand("schedule_query", "Create a new scheduled query"));
+        commands.add(new BotCommand("list_scheduled_queries", "List your scheduled queries"));
         try {
             this.execute(new SetMyCommands(commands, new BotCommandScopeDefault(), null));
             log.info("Successfully set bot commands menu.");
@@ -159,117 +174,138 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     public String getBotUsername() {
         return this.botUsername;
     }
+//here
+@Override
+public void onUpdateReceived(Update update) {
+    if (update.hasCallbackQuery()) {
+        handleCallbackQuery(update.getCallbackQuery());
+        return;
+    }
 
-    @Override
-    public void onUpdateReceived(Update update) {
-        if (update.hasCallbackQuery()) {
-            handleCallbackQuery(update.getCallbackQuery());
-            return;
-        }
+    if (update.hasMessage() && update.getMessage().hasText()) {
+        Message message = update.getMessage();
+        long chatId = message.getChatId();
+        long userId = message.getFrom().getId();
+        String telegramIdStr = String.valueOf(userId);
 
-        if (update.hasMessage() && update.getMessage().hasText()) {
-            Message message = update.getMessage();
-            long chatId = message.getChatId();
-            long userId = message.getFrom().getId();
-            String telegramIdStr = String.valueOf(userId);
+        MDC.put("telegramId", telegramIdStr);
+        try {
+            String messageText = message.getText();
+            String userFirstName = message.getFrom().getFirstName();
+            log.info("Received message from {}. Chat ID: {}, Text: '{}'", userFirstName, chatId, messageText);
 
-            MDC.put("telegramId", telegramIdStr);
-            try {
-                String messageText = message.getText();
-                String userFirstName = message.getFrom().getFirstName();
-                log.info("Received message from {}. Chat ID: {}, Text: '{}'", userFirstName, chatId, messageText);
-
-                AppUser appUser = findOrCreateUser(telegramIdStr);
-                if (appUser == null) {
-                    sendMessage(chatId, "Sorry, there was a problem accessing user data\\. Please try again later\\.");
-                    return;
-                }
-
-                UserState currentState = userStates.getOrDefault(userId, UserState.IDLE);
-                log.debug("Current state for user {}: {}", userId, currentState);
-                boolean processed = false;
-
-                // --- 1. State-based input handling ---
-                if (currentState.isCredentialInputState()) {
-                    if (!messageText.startsWith("/")) {
-                        handleCredentialsInput(chatId, userId, appUser, messageText, currentState);
-                        processed = true;
-                    } else {
-                        userStates.remove(userId); credentialsInputState.remove(userId); analysisInputState.remove(userId);
-                        log.warn("Command received, canceling credentials input.");
-                    }
-                } else if (currentState == UserState.WAITING_FOR_REPO_URL) {
-                    if (!messageText.startsWith("/")) {
-                        handleRepoUrlInput(chatId, userId, appUser, messageText);
-                        processed = true;
-                    } else {
-                        userStates.remove(userId); log.warn("Command received while waiting for repo URL.");
-                    }
-                } else if (currentState == UserState.WAITING_FOR_REPO_URL_FOR_CREDS) {
-                    if (!messageText.startsWith("/")) {
-                        handleRepoUrlForCredsInput(chatId, userId, appUser, messageText);
-                        processed = true;
-                    } else {
-                        userStates.remove(userId); credentialsInputState.remove(userId);
-                        log.warn("Command received while waiting for repo URL for credentials.");
-                    }
-                } else if (currentState == UserState.WAITING_FOR_LLM_QUERY) {
-                    if (!messageText.startsWith("/")) {
-                        handleQueryInput(chatId, userId, appUser, messageText);
-                        processed = true;
-                    } else {
-                        userStates.remove(userId); log.warn("Command received while waiting for query text.");
-                    }
-                }
-
-                // --- 2. Command handling ---
-                if (!processed && messageText.startsWith("/")) {
-                    log.debug("Processing message as a command: {}", messageText);
-                    String commandPart = messageText.split("\\s+")[0].toLowerCase();
-
-                    if (commandPart.equals("/query")) {
-                        String queryTextWithPotentialFlag = messageText.length() > 7 ? messageText.substring(7).trim() : "";
-
-                        boolean isJustAFlag = (queryTextWithPotentialFlag.equalsIgnoreCase(CSV_FLAG) && queryTextWithPotentialFlag.length() == CSV_FLAG.length()) ||
-                                (queryTextWithPotentialFlag.equalsIgnoreCase(TXT_FLAG) && queryTextWithPotentialFlag.length() == TXT_FLAG.length());
-
-                        if (!queryTextWithPotentialFlag.isEmpty() && !isJustAFlag) {
-                            handleQueryCommand(chatId, appUser, queryTextWithPotentialFlag);
-                        } else {
-                            sendMessage(chatId, "Please provide your query after `/query`\\.\nExample: `/query show all tasks` or `/query show all tasks --csv`");
-                            userStates.put(userId, UserState.WAITING_FOR_LLM_QUERY);
-                            sendMessage(chatId, "Alternatively, just type your query now\\.");
-                        }
-                        processed = true;
-                    } else if (commandPart.equals("/use_schema")) {
-                        String repoUrl = messageText.length() > 12 ? messageText.substring(12).trim() : "";
-                        handleUseSchemaCommand(chatId, appUser, repoUrl);
-                        processed = true;
-                    } else if (commandPart.equals("/set_db_credentials")) {
-                        credentialsInputState.put(userId, new DbCredentialsInput());
-                        userStates.put(userId, UserState.WAITING_FOR_REPO_URL_FOR_CREDS);
-                        sendMessage(chatId, "Which repository's DB credentials do you want to set or update\\?\nPlease enter the full URL:");
-                        processed = true;
-                    } else {
-                        handleCommand(chatId, userId, telegramIdStr, appUser, messageText, userFirstName);
-                        processed = true;
-                    }
-                }
-
-                // --- 3. Fallback ---
-                if (!processed && currentState == UserState.IDLE) {
-                    log.warn("Message '{}' was not processed by any handler in state {}.", messageText, currentState);
-                    sendMessage(chatId, "I'm not sure what to do with that\\. Try `/help`\\.");
-                }
-
-            } catch (Exception e) {
-                log.error("Unhandled exception during update processing for message: " + message.getText(), e);
-                sendMessage(chatId, "An unexpected error occurred\\.");
-            } finally {
-                MDC.remove("telegramId");
+            AppUser appUser = findOrCreateUser(telegramIdStr);
+            if (appUser == null) {
+                sendMessage(chatId, "Sorry, there was a problem accessing user data\\. Please try again later\\.");
+                return;
             }
+
+            UserState currentState = userStates.getOrDefault(userId, UserState.IDLE);
+            log.debug("Current state for user {}: {}", userId, currentState);
+            boolean processed = false;
+
+            // --- 1. State-based input handling ---
+            if (currentState.isCredentialInputState()) {
+                if (!messageText.startsWith("/")) {
+                    handleCredentialsInput(chatId, userId, appUser, messageText, currentState);
+                    processed = true;
+                } else {
+                    userStates.remove(userId); credentialsInputState.remove(userId); analysisInputState.remove(userId);
+                    log.warn("Command received, canceling credentials input.");
+                }
+            } else if (currentState == UserState.WAITING_FOR_REPO_URL) {
+                if (!messageText.startsWith("/")) {
+                    handleRepoUrlInput(chatId, userId, appUser, messageText);
+                    processed = true;
+                } else {
+                    userStates.remove(userId); log.warn("Command received while waiting for repo URL.");
+                }
+            } else if (currentState == UserState.WAITING_FOR_REPO_URL_FOR_CREDS) {
+                if (!messageText.startsWith("/")) {
+                    handleRepoUrlForCredsInput(chatId, userId, appUser, messageText);
+                    processed = true;
+                } else {
+                    userStates.remove(userId); credentialsInputState.remove(userId);
+                    log.warn("Command received while waiting for repo URL for credentials.");
+                }
+            } else if (currentState == UserState.WAITING_FOR_LLM_QUERY) {
+                if (!messageText.startsWith("/")) {
+                    handleQueryInput(chatId, userId, appUser, messageText);
+                    processed = true;
+                } else {
+                    userStates.remove(userId); log.warn("Command received while waiting for query text.");
+                }
+            }
+            // *** НОВОЕ: Обработка состояний для /schedule_query ***
+            else if (currentState.isScheduleCreationState()) {
+                if (!messageText.startsWith("/")) {
+                    handleScheduleCreationInput(chatId, userId, appUser, messageText, currentState);
+                    processed = true;
+                } else { // Command received, cancel schedule creation
+                    userStates.remove(userId); scheduleCreationStates.remove(userId);
+                    sendMessage(chatId, "Schedule creation cancelled\\.");
+                    log.warn("Command received, canceling schedule creation.");
+                }
+            }
+
+
+            // --- 2. Command handling ---
+            if (!processed && messageText.startsWith("/")) {
+                log.debug("Processing message as a command: {}", messageText);
+                String commandPart = messageText.split("\\s+")[0].toLowerCase();
+
+                if (commandPart.equals("/query")) {
+                    String queryTextWithPotentialFlag = messageText.length() > 7 ? messageText.substring(7).trim() : "";
+
+                    boolean isJustAFlag = (queryTextWithPotentialFlag.equalsIgnoreCase(CSV_FLAG) && queryTextWithPotentialFlag.length() == CSV_FLAG.length()) ||
+                            (queryTextWithPotentialFlag.equalsIgnoreCase(TXT_FLAG) && queryTextWithPotentialFlag.length() == TXT_FLAG.length());
+
+                    if (!queryTextWithPotentialFlag.isEmpty() && !isJustAFlag) {
+                        handleQueryCommand(chatId, appUser, queryTextWithPotentialFlag);
+                    } else {
+                        sendMessage(chatId, "Please provide your query after `/query`\\.\nExample: `/query show all tasks` or `/query show all tasks --csv`");
+                        userStates.put(userId, UserState.WAITING_FOR_LLM_QUERY);
+                        sendMessage(chatId, "Alternatively, just type your query now\\.");
+                    }
+                    processed = true;
+                } else if (commandPart.equals("/use_schema")) {
+                    String repoUrl = messageText.length() > 12 ? messageText.substring(12).trim() : "";
+                    handleUseSchemaCommand(chatId, appUser, repoUrl);
+                    processed = true;
+                } else if (commandPart.equals("/set_db_credentials")) {
+                    credentialsInputState.put(userId, new DbCredentialsInput());
+                    userStates.put(userId, UserState.WAITING_FOR_REPO_URL_FOR_CREDS);
+                    sendMessage(chatId, "Which repository's DB credentials do you want to set or update\\?\nPlease enter the full URL:");
+                    processed = true;
+                }
+                // *** НОВЫЕ КОМАНДЫ ***
+                else if (commandPart.equals("/schedule_query")) {
+                    startScheduleQueryFlow(chatId, userId, appUser);
+                    processed = true;
+                } else if (commandPart.equals("/list_scheduled_queries")) {
+                    handleListScheduledQueries(chatId, appUser);
+                    processed = true;
+                }
+                else {
+                    handleCommand(chatId, userId, telegramIdStr, appUser, messageText, userFirstName);
+                    processed = true;
+                }
+            }
+
+            // --- 3. Fallback ---
+            if (!processed && currentState == UserState.IDLE) {
+                log.warn("Message '{}' was not processed by any handler in state {}.", messageText, currentState);
+                sendMessage(chatId, "I'm not sure what to do with that\\. Try `/help`\\.");
+            }
+
+        } catch (Exception e) {
+            log.error("Unhandled exception during update processing for message: " + message.getText(), e);
+            sendMessage(chatId, "An unexpected error occurred\\.");
+        } finally {
+            MDC.remove("telegramId");
         }
     }
+}
 
     private AppUser findOrCreateUser(String telegramIdStr) {
         try {
@@ -763,6 +799,8 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         });
     }
 
+// В классе CognitiveQueryTelegramBot
+
     private void handleCallbackQuery(CallbackQuery callbackQuery) {
         String callbackData = callbackQuery.getData();
         long chatId = callbackQuery.getMessage().getChatId();
@@ -771,97 +809,150 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         String callbackQueryId = callbackQuery.getId();
 
         MDC.put("telegramId", telegramIdStr);
-        String answerText = "Processing...";
+        String answerText = "Processing..."; // Текст по умолчанию для всплывающего уведомления
+        boolean showAlert = false; // Показывать ли уведомление как alert
 
         try {
             log.info("Received callback query data: {}", callbackData);
+            AppUser appUser = findOrCreateUser(telegramIdStr);
+            if (appUser == null) {
+                answerText = "Error: User data not accessible.";
+                showAlert = true;
+                sendAnswerCallbackQuery(callbackQueryId, answerText, showAlert);
+                return;
+            }
+
             if (callbackData != null && callbackData.startsWith("execute_sql:")) {
                 String[] parts = callbackData.split(":");
-                if (parts.length != 3) {
+                if (parts.length != 3) { // Ожидаем execute_sql:historyId:format
+                    log.error("Invalid callback data format for execute_sql: {}", callbackData);
                     answerText = "Error: Invalid action format";
-                    sendAnswerCallbackQuery(callbackQueryId, answerText, true); return;
-                }
-                long historyIdToExecute;
-                try {
-                    historyIdToExecute = Long.parseLong(parts[1]);
-                } catch (NumberFormatException e) {
-                    answerText = "Error: Invalid History ID in action";
-                    sendAnswerCallbackQuery(callbackQueryId, answerText, true); return;
-                }
-                String format = parts[2];
+                    showAlert = true;
+                } else {
+                    long historyIdToExecute;
+                    try {
+                        historyIdToExecute = Long.parseLong(parts[1]);
+                    } catch (NumberFormatException e) {
+                        log.error("Invalid history ID in execute_sql callback: {}", parts[1]);
+                        answerText = "Error: Invalid History ID in action";
+                        showAlert = true;
+                        // Выходим здесь, так как без ID дальше некуда
+                        sendAnswerCallbackQuery(callbackQueryId, answerText, showAlert);
+                        return;
+                    }
+                    String format = parts[2]; // "text", "csv", or "txt"
 
-                AppUser appUser = findOrCreateUser(telegramIdStr);
-                if (appUser == null) { answerText = "Error: User not found"; sendAnswerCallbackQuery(callbackQueryId, answerText, true); return; }
+                    String storedData = lastGeneratedSql.get(appUser.getId());
+                    String sqlToExecute = null;
+                    if (storedData != null && storedData.startsWith(historyIdToExecute + ":")) {
+                        sqlToExecute = storedData.substring(String.valueOf(historyIdToExecute).length() + 1);
+                    }
 
-                String storedData = lastGeneratedSql.get(appUser.getId());
-                String sqlToExecute = null;
-                if (storedData != null && storedData.startsWith(historyIdToExecute + ":")) {
-                    sqlToExecute = storedData.substring(String.valueOf(historyIdToExecute).length() + 1);
-                }
+                    if (sqlToExecute != null) {
+                        Optional<AnalysisHistory> historyOpt = analysisHistoryRepository.findById(historyIdToExecute);
+                        if (historyOpt.isPresent() && Objects.equals(historyOpt.get().getAppUser().getId(), appUser.getId())) {
+                            AnalysisHistory history = historyOpt.get();
+                            if (history.hasCredentials()) {
+                                answerText = "Execution started..."; // Для toast-уведомления
+                                showAlert = false;
+                                sendMessage(chatId, "🚀 Executing SQL query\\.\\.\\."); // Сообщение в чат
+                                lastGeneratedSql.remove(appUser.getId());
 
-                if (sqlToExecute != null) {
-                    Optional<AnalysisHistory> historyOpt = analysisHistoryRepository.findById(historyIdToExecute);
-                    if (historyOpt.isPresent() && Objects.equals(historyOpt.get().getAppUser().getId(), appUser.getId())) {
-                        AnalysisHistory history = historyOpt.get();
-                        if (history.hasCredentials()) {
-                            answerText = "Execution started...";
-                            sendMessage(chatId, "🚀 Executing SQL query\\.\\.\\.");
-                            lastGeneratedSql.remove(appUser.getId());
+                                final String finalSql = sqlToExecute;
+                                final String finalFormat = format; // Для использования в лямбде
+                                final String repoUrlForFile = history.getRepositoryUrl(); // Для имени файла
 
-                            final String finalSql = sqlToExecute;
-                            final String finalFormat = format;
-
-                            taskExecutor.submit(() -> {
-                                MDC.put("telegramId", telegramIdStr);
-                                try {
-                                    DynamicQueryExecutorService.QueryResult result = queryExecutorService.executeQuery(
-                                            history.getDbHost(), history.getDbPort(), history.getDbName(),
-                                            history.getDbUser(), history.getDbPasswordEncrypted(), finalSql);
-                                    if (result.isSuccess()) {
-                                        if (result.type() == DynamicQueryExecutorService.QueryType.SELECT) {
-                                            List<Map<String, Object>> resultData = (List<Map<String, Object>>) result.data();
-                                            if ("csv".equals(finalFormat)) {
-                                                sendSelectResultAsCsvFile(chatId, resultData, history.getRepositoryUrl());
-                                            } else if ("txt".equals(finalFormat)) {
-                                                sendSelectResultAsTxtFile(chatId, resultData, history.getRepositoryUrl());
+                                taskExecutor.submit(() -> {
+                                    MDC.put("telegramId", telegramIdStr);
+                                    try {
+                                        DynamicQueryExecutorService.QueryResult result = queryExecutorService.executeQuery(
+                                                history.getDbHost(), history.getDbPort(), history.getDbName(),
+                                                history.getDbUser(), history.getDbPasswordEncrypted(), finalSql);
+                                        if (result.isSuccess()) {
+                                            if (result.type() == DynamicQueryExecutorService.QueryType.SELECT) {
+                                                @SuppressWarnings("unchecked") // Безопасно, т.к. мы проверяем тип
+                                                List<Map<String, Object>> resultData = (List<Map<String, Object>>) result.data();
+                                                if ("csv".equals(finalFormat)) {
+                                                    sendSelectResultAsCsvFile(chatId, resultData, repoUrlForFile);
+                                                } else if ("txt".equals(finalFormat)) {
+                                                    sendSelectResultAsTxtFile(chatId, resultData, repoUrlForFile);
+                                                } else { // По умолчанию "text"
+                                                    sendSelectResultAsTextInChat(chatId, resultData, repoUrlForFile);
+                                                }
+                                            } else if (result.type() == DynamicQueryExecutorService.QueryType.UPDATE) {
+                                                sendMessage(chatId, "✅ Query executed successfully\\. Rows affected: " + result.data());
                                             } else {
-                                                sendSelectResultAsTextInChat(chatId, resultData, history.getRepositoryUrl());
+                                                sendMessage(chatId, "✅ Query executed, unknown result type\\.");
                                             }
-                                        } else if (result.type() == DynamicQueryExecutorService.QueryType.UPDATE) {
-                                            sendMessage(chatId, "✅ Query executed successfully\\. Rows affected: " + result.data());
                                         } else {
-                                            sendMessage(chatId, "✅ Query executed, unknown result type\\.");
+                                            sendMessage(chatId, "❌ Query execution failed: " + escapeMarkdownV2(result.errorMessage()));
                                         }
-                                    } else {
-                                        sendMessage(chatId, "❌ Query execution failed: " + escapeMarkdownV2(result.errorMessage()));
+                                    } catch (Exception e) {
+                                        log.error("Error executing SQL query '{}'", finalSql, e);
+                                        sendMessage(chatId, "An unexpected error occurred during SQL execution\\.");
+                                    } finally {
+                                        MDC.remove("telegramId");
                                     }
-                                } catch (Exception e) {
-                                    log.error("Error executing SQL query '{}'", finalSql, e);
-                                    sendMessage(chatId, "An unexpected error occurred during SQL execution\\.");
-                                } finally { MDC.remove("telegramId"); }
-                            });
+                                });
+                            } else {
+                                answerText = "❌ Error: DB credentials missing!";
+                                showAlert = true;
+                                sendMessage(chatId, "❌ Cannot execute: DB credentials missing for this analysis history\\. Use `/set_db_credentials`\\.");
+                            }
                         } else {
-                            answerText = "❌ Error: DB credentials missing!";
-                            sendMessage(chatId, "❌ Cannot execute: DB credentials missing for this analysis history\\. Use `/set_db_credentials`\\.");
+                            answerText = "❌ Error: Invalid history!";
+                            showAlert = true;
+                            sendMessage(chatId, "❌ Cannot execute: Analysis history not found or invalid\\.");
                         }
                     } else {
-                        answerText = "❌ Error: Invalid history!";
-                        sendMessage(chatId, "❌ Cannot execute: Analysis history not found or invalid\\.");
+                        answerText = "❌ Error: Query expired or invalid!";
+                        showAlert = true;
+                        sendMessage(chatId, "Error: Could not find the SQL query to execute\\. Please generate it again using `/query`\\.");
+                    }
+                }
+            } else if (callbackData != null && callbackData.startsWith("sched_hist:")) {
+                answerText = "History selected.";
+                showAlert = false;
+                String historyIdStrCallback = callbackData.substring("sched_hist:".length());
+                // Вызываем соответствующий обработчик ввода для состояния создания расписания
+                handleScheduleHistoryIdInput(chatId, userId, appUser, historyIdStrCallback);
+            } else if (callbackData != null && callbackData.startsWith("sched_format:")) {
+                answerText = "Format selected.";
+                showAlert = false;
+                String formatCallback = callbackData.substring("sched_format:".length());
+                ScheduleCreationState state = scheduleCreationStates.get(userId);
+                if (state != null) {
+                    // Проверяем, что предыдущие шаги были завершены
+                    if (state.getAnalysisHistoryId() == null || state.getSqlQuery() == null || state.getCronExpression() == null || state.getChatIdToNotify() == null) {
+                        answerText = "Error: Previous steps not completed for scheduling.";
+                        showAlert = true;
+                        log.warn("User {} tried to set format for schedule via callback, but previous steps are missing. State: {}", userId, state);
+                    } else {
+                        state.setOutputFormat(formatCallback);
+                        saveScheduledQuery(chatId, userId, appUser); // appUser уже получен в начале метода
                     }
                 } else {
-                    answerText = "❌ Error: Query expired or invalid!";
-                    sendMessage(chatId, "Error: Could not find the SQL query to execute\\. Please generate it again using `/query`\\.");
+                    answerText = "Error: Schedule creation session expired or not found.";
+                    showAlert = true;
+                    log.warn("User {} tried to set format for schedule via callback, but no active schedule creation state found.", userId);
                 }
-            } else {
+            }
+            // TODO: Добавить обработчики для кнопок управления расписаниями (пауза, возобновление, удаление)
+            // Например:
+            // else if (callbackData != null && callbackData.startsWith("pause_sched:")) { ... }
+            // else if (callbackData != null && callbackData.startsWith("delete_sched:")) { ... }
+            else {
                 log.warn("Received unknown callback data: {}", callbackData);
                 answerText = "Unknown action";
+                showAlert = true;
             }
         } catch (Exception e) {
-            log.error("Error processing callback query", e);
+            log.error("Error processing callback query: " + callbackData, e);
             answerText = "Error processing action";
+            showAlert = true;
         } finally {
             MDC.remove("telegramId");
-            sendAnswerCallbackQuery(callbackQueryId, answerText, answerText.startsWith("❌ Error:"));
+            sendAnswerCallbackQuery(callbackQueryId, answerText, showAlert);
         }
     }
 
@@ -870,7 +961,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         try { execute(answer); } catch (TelegramApiException e) { log.error("Failed to answer callback query", e); }
     }
 
-    private void sendMessage(long chatId, String text) {
+    public void sendMessage(long chatId, String text) {
         SendMessage message = new SendMessage();
         message.setChatId(String.valueOf(chatId));
         message.setText(text);
@@ -888,7 +979,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         }
     }
 
-    private String escapeMarkdownV2(String text) {
+    public String escapeMarkdownV2(String text) {
         if (text == null) return "";
         return text.replaceAll("([_*~`>\\[\\]()#\\+\\-=|{}.!-])", "\\\\$1");
     }
@@ -897,9 +988,24 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         IDLE, WAITING_FOR_REPO_URL, WAITING_FOR_LLM_QUERY,
         WAITING_FOR_REPO_URL_FOR_CREDS,
         WAITING_FOR_DB_HOST, WAITING_FOR_DB_PORT, WAITING_FOR_DB_NAME,
-        WAITING_FOR_DB_USER, WAITING_FOR_DB_PASSWORD;
+        WAITING_FOR_DB_USER, WAITING_FOR_DB_PASSWORD,
+        WAITING_FOR_SCHEDULE_NAME,
+        WAITING_FOR_SCHEDULE_HISTORY_CHOICE, // Если даем выбор из списка
+        WAITING_FOR_SCHEDULE_HISTORY_ID,     // Если просим ввести ID
+        WAITING_FOR_SCHEDULE_SQL,
+        WAITING_FOR_SCHEDULE_CRON,
+        WAITING_FOR_SCHEDULE_CHAT_ID,
+        WAITING_FOR_SCHEDULE_OUTPUT_FORMAT;
+
         public boolean isCredentialInputState() {
             return this == WAITING_FOR_DB_HOST || this == WAITING_FOR_DB_PORT || this == WAITING_FOR_DB_NAME || this == WAITING_FOR_DB_USER || this == WAITING_FOR_DB_PASSWORD;
+        }
+
+        public boolean isScheduleCreationState() {
+            return this == WAITING_FOR_SCHEDULE_NAME || this == WAITING_FOR_SCHEDULE_HISTORY_CHOICE ||
+                    this == WAITING_FOR_SCHEDULE_HISTORY_ID || this == WAITING_FOR_SCHEDULE_SQL ||
+                    this == WAITING_FOR_SCHEDULE_CRON || this == WAITING_FOR_SCHEDULE_CHAT_ID ||
+                    this == WAITING_FOR_SCHEDULE_OUTPUT_FORMAT;
         }
     }
 
@@ -930,7 +1036,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         }
     }
 
-    private void sendSelectResultAsTextInChat(long chatId, List<Map<String, Object>> rows, String repoUrlForFilename) {
+    public void sendSelectResultAsTextInChat(long chatId, List<Map<String, Object>> rows, String repoUrlForFilename) {
         if (rows == null || rows.isEmpty()) {
             sendMessage(chatId, "✅ Query executed successfully, but it returned no rows\\.");
             return;
@@ -1054,7 +1160,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         return data;
     }
 
-    private void sendSelectResultAsCsvFile(long chatId, List<Map<String, Object>> rows, String repoUrlForFilename) {
+    public void sendSelectResultAsCsvFile(long chatId, List<Map<String, Object>> rows, String repoUrlForFilename) {
         if (rows == null || rows.isEmpty()) {
             sendMessage(chatId, "✅ Query executed successfully, but it returned no rows (nothing to put in CSV)\\.");
             return;
@@ -1095,7 +1201,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         }
     }
 
-    private void sendSelectResultAsTxtFile(long chatId, List<Map<String, Object>> rows, String repoUrlForFilename) {
+    public void sendSelectResultAsTxtFile(long chatId, List<Map<String, Object>> rows, String repoUrlForFilename) {
         if (rows == null || rows.isEmpty()) {
             sendMessage(chatId, "✅ Query executed successfully, but it returned no rows (nothing to put in TXT file)\\.");
             return;
@@ -1192,4 +1298,325 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
         }
     }
 
+    @Data // Для хранения промежуточных данных при создании расписания
+    private static class ScheduleCreationState {
+        private String name;
+        private Long analysisHistoryId;
+        private AnalysisHistory analysisHistory; // Для быстрого доступа после выбора
+        private String sqlQuery;
+        private String cronExpression;
+        private Long chatIdToNotify;
+        private String outputFormat;
+    }
+    private final Map<Long, ScheduleCreationState> scheduleCreationStates = new ConcurrentHashMap<>();
+
+
+    private void startScheduleQueryFlow(long chatId, long userId, AppUser appUser) {
+        scheduleCreationStates.put(userId, new ScheduleCreationState());
+        userStates.put(userId, UserState.WAITING_FOR_SCHEDULE_NAME);
+        sendMessage(chatId, "Let's create a new scheduled query\\! \nFirst, please enter a descriptive **name** for this schedule \\(e\\.g\\., `Daily User Report`\\):");
+    }
+
+    private void handleScheduleNameInput(long chatId, long userId, AppUser appUser, String name) {
+        ScheduleCreationState state = scheduleCreationStates.get(userId);
+        if (state == null) {
+            sendMessage(chatId, "Error: Schedule creation session expired or not found\\. Please start over with `/schedule_query`\\.");
+            userStates.remove(userId);
+            return;
+        }
+        if (name.trim().isEmpty()) {
+            sendMessage(chatId, "Schedule name cannot be empty\\. Please enter a name:");
+            return;
+        }
+        state.setName(name.trim());
+        userStates.put(userId, UserState.WAITING_FOR_SCHEDULE_HISTORY_ID); // Меняем на это состояние
+
+        List<AnalysisHistory> histories = analysisHistoryRepository.findByAppUserOrderByAnalyzedAtDesc(appUser);
+        if (histories.isEmpty()) {
+            sendMessage(chatId, "You have no analyzed repositories with set DB credentials\\. Please use `/analyze_repo` and `/set_db_credentials` first, then create a schedule\\.");
+            userStates.remove(userId);
+            scheduleCreationStates.remove(userId);
+            return;
+        }
+
+        List<AnalysisHistory> historiesWithCreds = histories.stream()
+                .filter(AnalysisHistory::hasCredentials)
+                .collect(Collectors.toList());
+
+        if (historiesWithCreds.isEmpty()) {
+            sendMessage(chatId, "You have analyzed repositories, but none of them have DB credentials set up\\. Please use `/set_db_credentials` first, then create a schedule\\.");
+            userStates.remove(userId);
+            scheduleCreationStates.remove(userId);
+            return;
+        }
+
+        StringBuilder sb = new StringBuilder("Great\\! Name set to: `" + escapeMarkdownV2(name.trim()) + "`\\.\n");
+        sb.append("Please choose the **Analyzed Repository Schema** this query should run against, or type its ID:\n");
+
+        var keyboardMarkupBuilder = InlineKeyboardMarkup.builder();
+        int buttonCount = 0;
+        final int MAX_BUTTONS_TO_SHOW = 5; // Показываем первые N для выбора кнопками
+
+        for (AnalysisHistory h : historiesWithCreds) {
+            if (buttonCount < MAX_BUTTONS_TO_SHOW) {
+                // Формируем текст для кнопки, чтобы он был информативным и не слишком длинным
+                String repoUrlDisplayName = h.getRepositoryUrl();
+                // Пытаемся извлечь имя репозитория из URL
+                try {
+                    String[] parts = repoUrlDisplayName.split("/");
+                    if (parts.length >= 2) {
+                        repoUrlDisplayName = parts[parts.length - 2] + "/" + parts[parts.length - 1];
+                    }
+                } catch (Exception e) { /* оставляем полный URL если не получилось */ }
+
+                repoUrlDisplayName = repoUrlDisplayName.length() > 35 ? "..." + repoUrlDisplayName.substring(repoUrlDisplayName.length() - 32) : repoUrlDisplayName;
+
+                String buttonText = String.format("ID %d: %s (%.7s)", h.getId(), repoUrlDisplayName, h.getCommitHash());
+                // Ограничиваем длину текста кнопки, если нужно (Telegram имеет лимиты)
+                buttonText = buttonText.length() > 60 ? buttonText.substring(0, 57) + "..." : buttonText;
+
+                keyboardMarkupBuilder.keyboardRow(List.of(InlineKeyboardButton.builder().text(buttonText).callbackData("sched_hist:" + h.getId()).build()));
+                buttonCount++;
+            } else {
+                break; // Достаточно кнопок
+            }
+        }
+
+        if (historiesWithCreds.size() > MAX_BUTTONS_TO_SHOW) {
+            sb.append("\n_More schemas available\\. Use `/list_schemas` to see all IDs and enter an ID manually if not listed above\\._");
+        }
+        if (buttonCount == 0 && historiesWithCreds.size() > 0) { // Если были истории с кредами, но не поместились в кнопки
+            sb.append("\n_Use `/list_schemas` to see all IDs and enter an ID manually\\._");
+        }
+        sb.append("\nOr type the ID directly if you know it\\.");
+
+        SendMessage listMessage = SendMessage.builder()
+                .chatId(chatId)
+                .text(sb.toString())
+                .parseMode("MarkdownV2")
+                .replyMarkup(keyboardMarkupBuilder.build())
+                .build();
+        tryExecute(listMessage);
+    }
+
+    private void handleScheduleCreationInput(long chatId, long userId, AppUser appUser, String text, UserState currentState) {
+        ScheduleCreationState state = scheduleCreationStates.get(userId);
+        if (state == null) {
+            sendMessage(chatId, "Error: Schedule creation process not found\\. Please start again with `/schedule_query`\\.");
+            userStates.remove(userId);
+            return;
+        }
+
+        switch (currentState) {
+            case WAITING_FOR_SCHEDULE_NAME:
+                handleScheduleNameInput(chatId, userId, appUser, text);
+                break;
+            case WAITING_FOR_SCHEDULE_HISTORY_ID:
+                handleScheduleHistoryIdInput(chatId, userId, appUser, text);
+                break;
+            case WAITING_FOR_SCHEDULE_SQL:
+                handleScheduleSqlInput(chatId, userId, appUser, text);
+                break;
+            case WAITING_FOR_SCHEDULE_CRON:
+                handleScheduleCronInput(chatId, userId, appUser, text);
+                break;
+            case WAITING_FOR_SCHEDULE_CHAT_ID:
+                handleScheduleChatIdInput(chatId, userId, appUser, text);
+                break;
+            case WAITING_FOR_SCHEDULE_OUTPUT_FORMAT:
+                // Этот шаг лучше делать через кнопки, но если текстом:
+                handleScheduleOutputFormatInput(chatId, userId, appUser, text);
+                break;
+            default:
+                log.warn("Unexpected state {} in handleScheduleCreationInput", currentState);
+                userStates.remove(userId);
+                scheduleCreationStates.remove(userId);
+                sendMessage(chatId, "An unexpected error occurred in scheduling\\. Please start over\\.");
+        }
+    }
+
+    private void handleScheduleSqlInput(long chatId, long userId, AppUser appUser, String sql) {
+        ScheduleCreationState state = scheduleCreationStates.get(userId);
+        if (state == null) { return; }
+        if (sql.trim().isEmpty() || !sql.trim().toLowerCase().startsWith("select")) { // Простая проверка
+            sendMessage(chatId, "❌ Invalid SQL query\\. It should start with `SELECT` and not be empty\\. Please try again:");
+            return;
+        }
+        state.setSqlQuery(sql.trim());
+        userStates.put(userId, UserState.WAITING_FOR_SCHEDULE_CRON);
+        sendMessage(chatId, "✅ SQL query set\\.\nNow, please enter the **CRON expression** for the schedule \\(e\\.g\\., `0 0 * * *` for daily at midnight, `0 12 * * MON-FRI` for noon on weekdays\\)\\.\nFor help with CRON, you can use an online generator like [crontab\\.guru](https://crontab.guru/)\\.");
+    }
+
+    private void handleScheduleCronInput(long chatId, long userId, AppUser appUser, String cronExpressionStr) {
+        ScheduleCreationState state = scheduleCreationStates.get(userId);
+        if (state == null) { return; }
+        try {
+            CronExpression.parse(cronExpressionStr.trim()); // Валидация CRON
+            state.setCronExpression(cronExpressionStr.trim());
+            userStates.put(userId, UserState.WAITING_FOR_SCHEDULE_CHAT_ID);
+            sendMessage(chatId, "✅ CRON expression set to: `" + escapeMarkdownV2(cronExpressionStr.trim()) + "`\\.\nNow, please enter the **Chat ID** where results should be sent\\. Type `this` to use the current chat\\.");
+        } catch (IllegalArgumentException e) {
+            sendMessage(chatId, "❌ Invalid CRON expression: " + escapeMarkdownV2(e.getMessage()) + "\\. Please try again:");
+        }
+    }
+
+    private void handleScheduleChatIdInput(long chatId, long userId, AppUser appUser, String chatIdStr) {
+        ScheduleCreationState state = scheduleCreationStates.get(userId);
+        if (state == null) {
+            sendMessage(chatId, "Error: Schedule creation session expired or not found\\. Please start over with `/schedule_query`\\.");
+            userStates.remove(userId); // Очищаем состояние
+            return;
+        }
+        long targetChatId;
+        if ("this".equalsIgnoreCase(chatIdStr.trim())) {
+            targetChatId = chatId;
+        } else {
+            try {
+                targetChatId = Long.parseLong(chatIdStr.trim());
+                // Дополнительная проверка: может ли бот писать в этот чат?
+                // Это сложно проверить заранее без попытки отправки.
+                // Пока оставим так, но в будущем можно добавить обработку ошибки при отправке уведомления.
+            } catch (NumberFormatException e) {
+                sendMessage(chatId, "❌ Invalid Chat ID format\\. Please enter a numeric ID or `this`\\.");
+                return; // Остаемся в том же состоянии, чтобы пользователь мог исправить
+            }
+        }
+        state.setChatIdToNotify(targetChatId);
+        userStates.put(userId, UserState.WAITING_FOR_SCHEDULE_OUTPUT_FORMAT);
+
+        var keyboardBuilder = InlineKeyboardMarkup.builder() // Используем Builder здесь
+                .keyboardRow(List.of(InlineKeyboardButton.builder().text("Text in Chat").callbackData("sched_format:text").build()))
+                .keyboardRow(List.of(InlineKeyboardButton.builder().text("TXT File").callbackData("sched_format:txt").build()))
+                .keyboardRow(List.of(InlineKeyboardButton.builder().text("CSV File").callbackData("sched_format:csv").build()));
+
+        // Создаем объект SendMessage для отправки с клавиатурой
+        SendMessage messageWithKeyboard = SendMessage.builder()
+                .chatId(chatId)
+                .text("✅ Chat ID for notifications set to: `" + targetChatId + "`\\.\nFinally, choose the **output format** for the results:")
+                .parseMode("MarkdownV2")
+                .replyMarkup(keyboardBuilder.build())
+                .build();
+        tryExecute(messageWithKeyboard); // Используем tryExecute для отправки
+    }
+
+    private void tryExecute(SendMessage message) {
+        try {
+            execute(message);
+        } catch (TelegramApiException e) {
+            log.error("Failed to send message with keyboard to chat ID {}: {}", message.getChatId(), e.getMessage());
+            // Попытка отправить без клавиатуры, если проблема была в ней
+            message.setReplyMarkup(null);
+            try {
+                execute(message);
+                log.info("Successfully sent message as plain text fallback after keyboard error.");
+            } catch (TelegramApiException ex) {
+                log.error("Failed to send plain text message either to chat ID {}: {}", message.getChatId(), ex.getMessage());
+            }
+        }
+    }
+
+    private void handleScheduleOutputFormatInput(long chatId, long userId, AppUser appUser, String format) {
+        // Этот метод будет вызываться, если пользователь ввел формат текстом,
+        // но лучше обрабатывать это через CallbackQuery от кнопок.
+        ScheduleCreationState state = scheduleCreationStates.get(userId);
+        if (state == null) { return; }
+        format = format.trim().toLowerCase();
+        if (!List.of("text", "txt", "csv").contains(format)) {
+            sendMessage(chatId, "❌ Invalid format\\. Please choose from `text`, `txt`, or `csv` or use the buttons\\.");
+            // Оставляем в том же состоянии, чтобы пользователь мог выбрать кнопкой
+            return;
+        }
+        state.setOutputFormat(format);
+        saveScheduledQuery(chatId, userId, appUser);
+    }
+
+
+    private void handleScheduleHistoryIdInput(long chatId, long userId, AppUser appUser, String historyIdStr) {
+        ScheduleCreationState state = scheduleCreationStates.get(userId);
+        if (state == null) { /* ... */ return; }
+        try {
+            long historyId = Long.parseLong(historyIdStr.trim());
+            Optional<AnalysisHistory> historyOpt = analysisHistoryRepository.findByIdAndAppUser(historyId, appUser); // Нужен такой метод в репо
+            if (historyOpt.isEmpty()) {
+                sendMessage(chatId, "❌ Invalid Analysis History ID or it does not belong to you\\. Please try again or use `/list_schemas` to find the correct ID\\.");
+                return; // Остаемся в том же состоянии
+            }
+            if (!historyOpt.get().hasCredentials()) {
+                sendMessage(chatId, "❌ The selected analysis history \\(ID: " + historyId + "\\) does not have database credentials set up\\. Please use `/set_db_credentials` for the repository `" + escapeMarkdownV2(historyOpt.get().getRepositoryUrl()) + "` first, or choose a different history\\.");
+                return; // Остаемся в том же состоянии
+            }
+            state.setAnalysisHistoryId(historyId);
+            state.setAnalysisHistory(historyOpt.get()); // Сохраняем для быстрого доступа
+            userStates.put(userId, UserState.WAITING_FOR_SCHEDULE_SQL);
+            sendMessage(chatId, "✅ Analysis History set to ID: " + historyId + " \\(`" + escapeMarkdownV2(historyOpt.get().getRepositoryUrl()) + "`\\)\\.\nNow, please enter the **SQL query** to be scheduled:");
+        } catch (NumberFormatException e) {
+            sendMessage(chatId, "❌ Invalid ID format\\. Please enter a numeric ID\\.");
+        }
+    }
+
+    // ... Добавьте обработчики для WAITING_FOR_SCHEDULE_SQL, WAITING_FOR_SCHEDULE_CRON, и т.д.
+    // Последний шаг (например, WAITING_FOR_SCHEDULE_OUTPUT_FORMAT) будет вызывать saveScheduledQuery(...)
+
+    private void saveScheduledQuery(long chatId, long userId, AppUser appUser) {
+        ScheduleCreationState state = scheduleCreationStates.get(userId);
+        if (state == null || state.getAnalysisHistoryId() == null || state.getSqlQuery() == null || state.getCronExpression() == null || state.getChatIdToNotify() == null || state.getOutputFormat() == null) {
+            sendMessage(chatId, "❌ Something went wrong, some information is missing\\. Please start over with `/schedule_query`\\.");
+            userStates.remove(userId); scheduleCreationStates.remove(userId);
+            return;
+        }
+
+        try {
+            CronExpression cron = CronExpression.parse(state.getCronExpression());
+            LocalDateTime nextExecution = cron.next(LocalDateTime.now());
+
+            ScheduledQuery newScheduledQuery = new ScheduledQuery(
+                    appUser,
+                    state.getAnalysisHistory(), // Используем сохраненный объект
+                    state.getSqlQuery(),
+                    state.getCronExpression(),
+                    state.getChatIdToNotify(),
+                    state.getOutputFormat(),
+                    state.getName()
+            );
+            newScheduledQuery.setNextExecutionAt(nextExecution);
+            // String userTimeZone = getTimeZoneFromUser(appUser); // Метод для получения часового пояса (если реализовано)
+            // newScheduledQuery.setTimezoneId(userTimeZone);
+
+            scheduledQueryRepository.save(newScheduledQuery);
+            sendMessage(chatId, "✅ Scheduled query '" + escapeMarkdownV2(state.getName()) + "' created successfully\\! Next execution: `" + escapeMarkdownV2(nextExecution.toString()) + "`");
+        } catch (IllegalArgumentException e) {
+            sendMessage(chatId, "❌ Invalid CRON expression: `" + escapeMarkdownV2(state.getCronExpression()) + "`\\. " + escapeMarkdownV2(e.getMessage()) + "\\. Please try again\\.");
+            userStates.put(userId, UserState.WAITING_FOR_SCHEDULE_CRON); // Возвращаем на шаг ввода CRON
+            sendMessage(chatId, "Please re\\-enter the CRON expression:");
+            return; // Не очищаем состояние, чтобы пользователь мог исправить CRON
+        } catch (Exception e) {
+            log.error("Error saving scheduled query for user {}", userId, e);
+            sendMessage(chatId, "❌ An error occurred while saving the scheduled query\\. Please try again\\.");
+        }
+        userStates.remove(userId);
+        scheduleCreationStates.remove(userId);
+    }
+
+
+    private void handleListScheduledQueries(long chatId, AppUser appUser) {
+        List<ScheduledQuery> schedules = scheduledQueryRepository.findByAppUserOrderByCreatedAtDesc(appUser);
+        if (schedules.isEmpty()) {
+            sendMessage(chatId, "You have no scheduled queries\\. Use `/schedule_query` to create one\\.");
+            return;
+        }
+        StringBuilder sb = new StringBuilder("Your Scheduled Queries:\n");
+        for (ScheduledQuery sq : schedules) {
+            sb.append(String.format("ID: `%d` Name: `%s` %s\n  Repo: `%s`\n  CRON: `%s`\n  Next Run: `%s`\n  Output: %s\n\\-\\--\n",
+                    sq.getId(),
+                    escapeMarkdownV2(sq.getName() != null ? sq.getName() : "N/A"),
+                    sq.isEnabled() ? "✅" : "⏸️",
+                    escapeMarkdownV2(sq.getAnalysisHistory().getRepositoryUrl()),
+                    escapeMarkdownV2(sq.getCronExpression()),
+                    escapeMarkdownV2(sq.getNextExecutionAt() != null ? sq.getNextExecutionAt().toString() : "N/A"),
+                    escapeMarkdownV2(sq.getOutputFormat())
+            ));
+            // TODO: Добавить кнопки для управления каждым расписанием
+        }
+        sendMessage(chatId, sb.toString());
+    }
 }
