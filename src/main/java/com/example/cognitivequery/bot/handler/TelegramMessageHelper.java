@@ -49,16 +49,32 @@ public class TelegramMessageHelper {
     }
 
     public void tryExecute(SendMessage message) {
+        org.telegram.telegrambots.meta.api.objects.replykeyboard.ReplyKeyboard originalKeyboard = message.getReplyMarkup();
+        String chatIdStr = message.getChatId();
+
         try {
             bot.execute(message);
         } catch (TelegramApiException e) {
-            log.error("Failed to send message with keyboard to chat ID {}: {}", message.getChatId(), e.getMessage());
+            log.warn("Attempt 1 (original) failed for SendMessage to chat ID {}: {}. Message: '{}'. Trying fallbacks.", chatIdStr, e.getMessage(), message.getText());
+
+            if (originalKeyboard != null) {
+                message.setReplyMarkup(null);
+                try {
+                    bot.execute(message);
+                    log.info("Attempt 2 (original parse mode, no keyboard) successful for chat ID {}.", chatIdStr);
+                    return;
+                } catch (TelegramApiException e2) {
+                    log.warn("Attempt 2 (original parse mode, no keyboard) failed for chat ID {}: {}. Message: '{}'", chatIdStr, e2.getMessage(), message.getText());
+                }
+            }
+
+            message.setParseMode(null);
             message.setReplyMarkup(null);
             try {
                 bot.execute(message);
-                log.info("Successfully sent message as plain text fallback after keyboard error.");
+                log.info("Attempt 3 (plain text, no keyboard) successful for chat ID {}.", chatIdStr);
             } catch (TelegramApiException ex) {
-                log.error("Failed to send plain text message either to chat ID {}: {}", message.getChatId(), ex.getMessage());
+                log.error("All SendMessage attempts failed for chat ID {}. Final error: {}. Message: '{}'", chatIdStr, ex.getMessage(), message.getText(), ex);
             }
         }
     }
