@@ -44,10 +44,10 @@ public class DynamicQueryExecutorService {
 
     /**
      * Executes a given SQL query against a specified database using provided credentials.
-     * Performs basic checks against potentially harmful DDL statements.
+     * Performs basic checks against potentially harmful DDL statements and data modifications.
      */
     public QueryResult executeQuery(String host, Integer port, String dbName, String username,
-                                    String encryptedPassword, String sqlQuery) {
+                                    String encryptedPassword, String sqlQuery, boolean allowModifications) {
 
         // Validate inputs
         if (!StringUtils.hasText(host) || port == null || !StringUtils.hasText(dbName) ||
@@ -59,35 +59,57 @@ public class DynamicQueryExecutorService {
             return QueryResult.error("SQL query cannot be empty.");
         }
 
-        // Basic DDL/dangerous command check (can be improved)
+        // Basic DDL/dangerous command check
         String upperQuery = sqlQuery.trim().toUpperCase();
-        if (upperQuery.startsWith("DROP ") || upperQuery.startsWith("TRUNCATE ") ||
-                upperQuery.startsWith("ALTER ") || upperQuery.startsWith("DELETE ") && !upperQuery.contains("WHERE")) { // Basic check for DELETE without WHERE
-            log.warn("Attempt to execute potentially dangerous/unrestricted statement: {}", sqlQuery.split("\\s+")[0]);
-            return QueryResult.error("Execution of potentially dangerous or unrestricted statements (DROP, TRUNCATE, ALTER, DELETE without WHERE) is not allowed.");
+
+        // 1. "RED ZONE" LEVEL (Always Forbidden)
+        // DDL commands that break structure
+        if (upperQuery.startsWith("DROP") ||
+                upperQuery.startsWith("TRUNCATE") ||
+                upperQuery.startsWith("ALTER") ||
+                upperQuery.startsWith("GRANT") ||
+                upperQuery.startsWith("REVOKE")) {
+            log.warn("Blocked dangerous DDL statement: {}", sqlQuery.split("\\s+")[0]);
+            return QueryResult.error("⛔ Security Block: DDL statements (DROP, ALTER, TRUNCATE, etc.) are permanently disabled.");
+        }
+
+        // 2. "YELLOW ZONE" LEVEL (Depends on setting)
+        // DML data modification commands
+        boolean isModification = upperQuery.startsWith("INSERT") ||
+                upperQuery.startsWith("UPDATE") ||
+                upperQuery.startsWith("DELETE");
+
+        if (isModification && !allowModifications) {
+            return QueryResult.error("🔒 Modification Block: 'Data Modification' is disabled in your /settings. Enable it to run INSERT/UPDATE/DELETE.");
+        }
+
+        // Additional safety check against "DELETE without WHERE"
+        if (upperQuery.startsWith("DELETE") && !upperQuery.contains("WHERE")) {
+            return QueryResult.error("⚠️ Safety Block: DELETE statements without WHERE clause are not allowed to prevent accidental mass deletion.");
         }
 
         // Decrypt password
         Optional<String> passwordOpt = encryptionService.decrypt(encryptedPassword);
         if (passwordOpt.isEmpty()) {
-            log.error("Failed to decrypt database password for user: {}", username); // Avoid logging password hash
+            log.error("Failed to decrypt database password for user: {}", username);
             return QueryResult.error("Failed to decrypt database password.");
         }
         String password = passwordOpt.get();
 
-        // Build JDBC URL (ensure driver is loaded - Spring Boot usually handles this)
+        // Build JDBC URL
         String jdbcUrl = String.format("jdbc:postgresql://%s:%d/%s", host, port, dbName);
         log.info("Attempting to execute query for user {} on: {}/{}", username, host, dbName);
 
         // Use try-with-resources for JDBC resources
         try (Connection connection = DriverManager.getConnection(jdbcUrl, username, password)) {
-            connection.setAutoCommit(true); // Use auto-commit for simplicity unless transactions needed
+            connection.setReadOnly(!allowModifications);
+            connection.setAutoCommit(true);
             log.debug("Database connection established successfully for user {}.", username);
 
             try (Statement statement = connection.createStatement()) {
-                statement.setQueryTimeout(QUERY_TIMEOUT_SECONDS); // Set query timeout
+                statement.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
 
-                boolean isSelect = statement.execute(sqlQuery); // Returns true if the first result is a ResultSet
+                boolean isSelect = statement.execute(sqlQuery);
 
                 if (isSelect) {
                     // Process SELECT result
@@ -102,7 +124,7 @@ public class DynamicQueryExecutorService {
                             for (int i = 1; i <= columnCount; i++) {
                                 String columnName = metaData.getColumnLabel(i); // Use label (alias)
                                 Object value = resultSet.getObject(i);
-                                row.put(columnName, value); // Store raw object
+                                row.put(columnName, value);
                             }
                             results.add(row);
                             rowCount++;

@@ -27,4 +27,6 @@ public interface AnalysisHistoryRepository extends JpaRepository<AnalysisHistory
     List<AnalysisHistory> findByAppUserOrderByAnalyzedAtDesc(AppUser appUser);
 
     Optional<AnalysisHistory> findByIdAndAppUser(Long id, AppUser appUser);
+
+    Optional<AnalysisHistory> findFirstByAppUserAndDbHostIsNotNullOrderByAnalyzedAtDesc(AppUser appUser);
 }

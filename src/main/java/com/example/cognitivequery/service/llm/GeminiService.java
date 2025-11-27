@@ -30,132 +30,227 @@ public class GeminiService {
     @Value("${google.gemini.api.base-url}")
     private String apiBaseUrl;
 
-    // TypeReference for parsing Gemini API response
     private static final ParameterizedTypeReference<Map<String, Object>> GEMINI_RESPONSE_TYPE =
             new ParameterizedTypeReference<>() {};
 
     /**
-     * Generates an SQL query based on a database schema and a user's natural language query.
-     *
-     * @param dbSchemaJson The database schema description as a JSON string.
-     * @param userQuery    The user's query in natural language.
-     * @return Optional containing the generated SQL query string, or Optional.empty() if an error occurs.
+     * Generates SQL considering the previous context (conversational mode).
      */
-    public Optional<String> generateSqlFromSchema(String dbSchemaJson, String userQuery) {
+    public Optional<String> generateSqlFromSchema(String dbSchemaJson, String userQuery, String previousSql) {
         if (apiKey == null || apiKey.isBlank()) {
             log.error("Gemini API Key is not configured!");
             return Optional.empty();
         }
 
-        String prompt = buildPrompt(dbSchemaJson, userQuery);
+        String prompt = buildPrompt(dbSchemaJson, userQuery, previousSql);
         Map<String, Object> requestBody = buildRequestBody(prompt);
 
-        WebClient client = webClientBuilder.baseUrl(apiBaseUrl).build();
-        // Construct the API URL path correctly relative to the base URL
-        String apiUrlPath = String.format("/models/%s:generateContent?key=%s", modelName, apiKey);
-
-        log.debug("Sending request to Gemini API. URL Path: {}...", apiUrlPath.substring(0, apiUrlPath.indexOf('?'))); // Avoid logging the key
-
-        try {
-            // Perform the POST request
-            Map<String, Object> response = client.post()
-                    .uri(apiUrlPath) // Use the path relative to the base URL
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(BodyInserters.fromValue(requestBody))
-                    .retrieve()
-                    .bodyToMono(GEMINI_RESPONSE_TYPE)
-                    .block(); // Using block() for simplicity; consider reactive streams for production
-
-            return extractSqlFromResponse(response);
-
-        } catch (WebClientResponseException e) {
-            // Handle specific API errors (4xx, 5xx)
-            log.error("Gemini API Error: Status Code: {}, Response Body: {}", e.getStatusCode(), e.getResponseBodyAsString(), e);
-            return Optional.empty();
-        } catch (Exception e) {
-            // Handle other unexpected errors during the API call
-            log.error("Unexpected error calling Gemini API", e);
-            return Optional.empty();
-        }
+        return sendRequestToGemini(requestBody);
     }
 
-    /**
-     * Constructs the prompt for the Gemini model.
-     */
-    private String buildPrompt(String dbSchemaJson, String userQuery) {
-        // This prompt can be further refined with examples (few-shot learning) for better results
+    public Optional<String> generateSqlFromSchema(String dbSchemaJson, String userQuery) {
+        return generateSqlFromSchema(dbSchemaJson, userQuery, null);
+    }
+
+    private String buildPrompt(String dbSchemaJson, String userQuery, String previousSql) {
+        String historyPart = "";
+        if (previousSql != null && !previousSql.isBlank()) {
+            historyPart = String.format("""
+                    
+                    PREVIOUSLY EXECUTED SQL:
+                    ```sql
+                    %s
+                    ```
+                    
+                    INSTRUCTION FOR REFINEMENT:
+                    1. IF the new request is a follow-up, MODIFY the Previous SQL.
+                    2. IF the new request is a new topic, IGNORE Previous SQL.
+                    """, previousSql);
+        }
+
         return String.format(
                 """
-                        You are an AI assistant specialized in generating SQL queries for PostgreSQL based on a provided database schema and a user request.
-                        Analyze the following database schema provided in JSON format:
-                        
-                        ```json
-                        %s
-                        ```
-                        
-                        Based on this schema, generate a PostgreSQL SQL query that fulfills the following user request:
-                        User Request: "%s"
-                        
-                        IMPORTANT: Respond ONLY with the raw SQL query, without any explanations, comments, or markdown formatting like ```sql ... ```.""",
+                You are an AI assistant specialized in generating SQL queries for PostgreSQL.
+                
+                Database Schema:
+                ```json
+                %s
+                ```
+                %s
+                User Request: "%s"
+                
+                CRITICAL INSTRUCTIONS:
+                1. Analyze the Schema. Does it contain the data requested by the user?
+                2. IF YES -> Generate a PostgreSQL query. Respond ONLY with the raw SQL (no markdown).
+                3. IF NO (e.g., user asks for "cars" but no car tables exist) -> Respond exactly with: NO_DATA: <Short explanation why>
+                
+                Examples:
+                - User: "Show users" -> SELECT * FROM users;
+                - User: "Show weather" (and no weather table) -> NO_DATA: The database schema does not contain weather information.
+                """,
                 dbSchemaJson,
+                historyPart,
                 userQuery
         );
     }
 
     /**
-     * Creates the request body payload for the Gemini API.
+     * Fixes an SQL query based on the database error message.
      */
-    private Map<String, Object> buildRequestBody(String prompt) {
-        // Structure according to Gemini API v1beta documentation
-        Map<String, String> textPart = Map.of("text", prompt);
-        Map<String, List<Map<String, String>>> content = Map.of("parts", List.of(textPart));
-        // generationConfig or safetySettings can be added here if needed
-        return Map.of("contents", List.of(content));
+    public Optional<String> fixSql(String dbSchemaJson, String badSql, String errorMessage) {
+        String prompt = String.format(
+                """
+                You are a PostgreSQL expert. I tried to execute a query you generated, but it failed.
+                
+                Database Schema:
+                ```json
+                %s
+                ```
+                
+                Bad SQL Query:
+                ```sql
+                %s
+                ```
+                
+                Error Message from Database:
+                "%s"
+                
+                Task: Correct the SQL query to fix the error.
+                
+                CRITICAL INSTRUCTIONS:
+                1. Check if the table or column mentioned in the error actually exists in the Schema.
+                2. If it exists (maybe a typo like "user" vs "users"), FIX the SQL and return ONLY the raw SQL.
+                3. If the table/column does NOT exist in the schema at all, DO NOT generate a fake query. Instead, return exactly the word: ABORT_EXPLAIN
+                
+                Respond ONLY with the SQL or the word ABORT_EXPLAIN.
+                """,
+                dbSchemaJson, badSql, errorMessage
+        );
+
+        Map<String, Object> requestBody = buildRequestBody(prompt);
+        return sendRequestToGemini(requestBody);
     }
 
     /**
-     * Extracts the generated text (expected SQL) from the Gemini API response structure.
+     * Explains the query failure to the user in simple terms.
      */
-    @SuppressWarnings("unchecked") // Suppress warnings for casting generic Map/List from response
-    private Optional<String> extractSqlFromResponse(Map<String, Object> response) {
-        if (response == null) {
-            log.warn("Received null response from Gemini API.");
-            return Optional.empty();
-        }
+    public Optional<String> explainError(String dbSchemaJson, String badSql, String errorMessage) {
+        String prompt = String.format(
+                """
+                You are a helpful Data Analyst. I tried to execute a SQL query, but it failed.
+                
+                Database Schema:
+                ```json
+                %s
+                ```
+                
+                Failed SQL:
+                ```sql
+                %s
+                ```
+                
+                Error Message:
+                "%s"
+                
+                Task: Explain to the user WHY this failed in simple, concise language (2-3 sentences).
+                If the error is about missing columns/tables, assume the Schema is the source of truth and tell the user what actually exists.
+                Do NOT suggest new SQL code, just explain the problem.
+                """,
+                dbSchemaJson, badSql, errorMessage
+        );
+
+        Map<String, Object> requestBody = buildRequestBody(prompt);
+        return sendRequestToGemini(requestBody);
+    }
+
+    /**
+     * Generates a short analytical summary based on the query results.
+     */
+    public Optional<String> analyzeQueryResult(String userQuery, String sql, String dataJson) {
+        // Truncate data to avoid exceeding context window
+        String truncatedData = dataJson.length() > 2000 ? dataJson.substring(0, 2000) + "...(truncated)" : dataJson;
+
+        String prompt = String.format(
+                """
+                You are a Business Intelligence Analyst.
+                
+                User Question: "%s"
+                Executed SQL: "%s"
+                
+                Result Data (JSON):
+                ```json
+                %s
+                ```
+                
+                Task: Provide a SHORT, concise insight or summary based on this data. 
+                Answer the user's question directly using the numbers. 
+                Do NOT describe the table structure. Focus on the value/answer.
+                If the data is empty, just say "No data found matching criteria".
+                Max length: 2-3 sentences.
+                """,
+                userQuery, sql, truncatedData
+        );
+
+        Map<String, Object> requestBody = buildRequestBody(prompt);
+        return sendRequestToGemini(requestBody);
+    }
+
+    /**
+     * Common method for sending requests to the Gemini API.
+     */
+    private Optional<String> sendRequestToGemini(Map<String, Object> requestBody) {
+        WebClient client = webClientBuilder.baseUrl(apiBaseUrl).build();
+        String apiUrlPath = String.format("/models/%s:generateContent?key=%s", modelName, apiKey);
+
+        log.debug("Sending request to Gemini API...");
 
         try {
-            // Navigate the Gemini response structure
-            List<Map<String, Object>> candidates = (List<Map<String, Object>>) response.get("candidates");
-            if (candidates == null || candidates.isEmpty()) {
-                log.warn("No 'candidates' found in Gemini response: {}", response);
-                // Check for content blocking
-                Map<String, Object> promptFeedback = (Map<String, Object>) response.get("promptFeedback");
-                if (promptFeedback != null && "BLOCK".equals(promptFeedback.get("blockReason"))) {
-                    log.error("Gemini API blocked the prompt. Reason: {}", promptFeedback.get("blockReason"));
-                }
-                return Optional.empty();
-            }
+            Map<String, Object> response = client.post()
+                    .uri(apiUrlPath)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(BodyInserters.fromValue(requestBody))
+                    .retrieve()
+                    .bodyToMono(GEMINI_RESPONSE_TYPE)
+                    .block();
 
-            Map<String, Object> candidate = candidates.getFirst(); // Get the first candidate
+            return extractSqlFromResponse(response);
+
+        } catch (WebClientResponseException e) {
+            log.error("Gemini API Error: Status Code: {}, Response Body: {}", e.getStatusCode(), e.getResponseBodyAsString(), e);
+            return Optional.empty();
+        } catch (Exception e) {
+            log.error("Unexpected error calling Gemini API", e);
+            return Optional.empty();
+        }
+    }
+
+    private Map<String, Object> buildRequestBody(String prompt) {
+        Map<String, String> textPart = Map.of("text", prompt);
+        Map<String, List<Map<String, String>>> content = Map.of("parts", List.of(textPart));
+        return Map.of("contents", List.of(content));
+    }
+
+    @SuppressWarnings("unchecked")
+    private Optional<String> extractSqlFromResponse(Map<String, Object> response) {
+        if (response == null) return Optional.empty();
+        try {
+            List<Map<String, Object>> candidates = (List<Map<String, Object>>) response.get("candidates");
+            if (candidates == null || candidates.isEmpty()) return Optional.empty();
+
+            Map<String, Object> candidate = candidates.getFirst();
             Map<String, Object> content = (Map<String, Object>) candidate.get("content");
-            if (content == null) { log.warn("No 'content' found in Gemini candidate: {}", candidate); return Optional.empty(); }
+            if (content == null) return Optional.empty();
 
             List<Map<String, Object>> parts = (List<Map<String, Object>>) content.get("parts");
-            if (parts == null || parts.isEmpty()) { log.warn("No 'parts' found in Gemini content: {}", content); return Optional.empty(); }
+            if (parts == null || parts.isEmpty()) return Optional.empty();
 
-            String generatedText = (String) parts.getFirst().get("text"); // Get text from the first part
+            String generatedText = (String) parts.getFirst().get("text");
             if (generatedText != null && !generatedText.isBlank()) {
-                // Clean up potential Markdown formatting if the model added it despite instructions
                 String cleanedSql = generatedText.trim().replace("```sql", "").replace("```", "").trim();
-                log.info("Successfully extracted SQL from Gemini response.");
-                log.debug("Generated SQL: {}", cleanedSql); // Log SQL at DEBUG level
                 return Optional.of(cleanedSql);
-            } else {
-                log.warn("Empty 'text' found in Gemini response part: {}", parts.getFirst());
             }
-        } catch (ClassCastException | NullPointerException e) {
-            // Handle potential errors if the response structure is not as expected
-            log.error("Error parsing Gemini API response structure: {}", response, e);
+        } catch (Exception e) {
+            log.error("Error parsing Gemini response", e);
         }
         return Optional.empty();
     }

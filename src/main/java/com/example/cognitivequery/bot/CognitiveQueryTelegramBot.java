@@ -49,6 +49,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     private final TelegramMessageHelper messageHelper;
     private final ScheduledQueryExecutionService scheduledQueryExecutionService;
 
+    // Executor for offloading long-running tasks like DB queries and LLM calls
     private final ExecutorService taskExecutor = Executors.newCachedThreadPool();
 
     public static final Pattern GITHUB_URL_PATTERN = Pattern.compile(
@@ -56,6 +57,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     public static final Pattern BASIC_URL_PATTERN = Pattern.compile("^https?://.+", Pattern.CASE_INSENSITIVE);
     public static final String CSV_FLAG = "--csv";
     public static final String TXT_FLAG = "--txt";
+    public static final String EXCEL_FLAG = "--excel";
 
 
     public CognitiveQueryTelegramBot(
@@ -111,11 +113,13 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
     private void setBotCommands() {
         List<BotCommand> commands = new ArrayList<>();
         commands.add(new BotCommand("start", "Start interaction"));
+        commands.add(new BotCommand("settings", "Configure charts & AI options"));
         commands.add(new BotCommand("connect_github", "Link GitHub account"));
         commands.add(new BotCommand("analyze_repo", "Analyze repository schema"));
-        commands.add(new BotCommand("query", "Ask about data (add --csv or --txt for file output)"));
+        commands.add(new BotCommand("query", "Ask about data (add --csv, --txt or --excel for file output)"));
         commands.add(new BotCommand("list_schemas", "List analyzed repositories"));
         commands.add(new BotCommand("use_schema", "Set context for /query by URL"));
+        commands.add(new BotCommand("show_schema", "Visualize database structure"));
         commands.add(new BotCommand("set_db_credentials", "Set DB credentials for a repo"));
         commands.add(new BotCommand("schedule_query", "Create a new scheduled query"));
         commands.add(new BotCommand("list_scheduled_queries", "List your scheduled queries"));
@@ -145,7 +149,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                     messageHelper.sendAnswerCallbackQuery(callbackQuery.getId(), "User data error.", true);
                     return;
                 }
-                // Pass taskExecutor to the callback handler if needed for asynchronous operations
+                // Pass taskExecutor to the callback handler for asynchronous operations
                 botCallbackHandler.handle(callbackQuery, appUser, messageHelper, taskExecutor);
             } catch (Exception e) {
                 log.error("Unhandled exception during callback query processing: " + callbackQuery.getData(), e);
@@ -173,9 +177,7 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                     messageHelper.sendMessage(chatId, "Sorry, there was a problem accessing user data\\. Please try again later\\.");
                     return;
                 }
-                // Use the ID from our AppUser for states, as it might be the PK in our DB
                 long internalUserId = appUser.getId();
-
 
                 UserState currentState = botStateService.getUserState(internalUserId);
                 log.debug("Current state for user (internal ID {}): {}", internalUserId, currentState);
@@ -202,7 +204,6 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                     if (currentState.isScheduleCreationState()) {
                         processed = botInputHandler.processScheduleCreationInput(message, appUser, currentState, messageHelper, taskExecutor);
                     } else if (currentState.isCredentialInputState()) {
-                        // FIX: pass taskExecutor
                         processed = botInputHandler.processCredentialsInput(message, appUser, currentState, messageHelper, taskExecutor);
                     } else {
                         processed = botInputHandler.processGeneralInput(message, appUser, currentState, messageHelper, taskExecutor);
@@ -217,15 +218,26 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
                     String command = parts[0].toLowerCase();
                     String commandArgs = parts.length > 1 ? parts[1].trim() : "";
 
-                    // Pass taskExecutor to the command handler if needed there
+                    // Pass taskExecutor to the command handler
                     botCommandHandler.handle(message, appUser, command, commandArgs, userFirstName, messageHelper, taskExecutor);
                     processed = true;
                 }
 
                 // 3. Fallback
                 if (!processed && currentState == UserState.IDLE) {
-                    log.warn("Message '{}' from user (internal ID {}) was not processed by any handler in state {}.", messageText, internalUserId, currentState);
-                    messageHelper.sendMessage(chatId, "I'm not sure what to do with that\\. Try `/help`\\.");
+
+                    // NEW LOGIC: Check for conversational context
+                    String lastSql = botStateService.getLastGeneratedSql(internalUserId);
+
+                    if (lastSql != null && !messageText.startsWith("/")) {
+                        // If we have query history, assume the user is continuing the conversation
+                        log.info("Treating text '{}' as conversational query update for user {}", messageText, internalUserId);
+                        botCommandHandler.processUserQuery(chatId, appUser, messageText, messageHelper, taskExecutor);
+                    } else {
+                        // If no history, send fallback message
+                        log.warn("Message '{}' from user {} was not processed.", messageText, internalUserId);
+                        messageHelper.sendMessage(chatId, "I'm not sure what to do with that\\. Try `/query <question>` or `/help`\\.");
+                    }
                 }
 
             } catch (Exception e) {
@@ -242,7 +254,6 @@ public class CognitiveQueryTelegramBot extends TelegramLongPollingBot {
             return userRepository.findByTelegramId(telegramIdStr).orElseGet(() -> {
                 log.info("User not found, creating new for Telegram ID: {}", telegramIdStr);
                 AppUser newUser = new AppUser(telegramIdStr);
-                // If AppUser should have a default githubId or other fields, set them here
                 return userRepository.save(newUser);
             });
         } catch (Exception e) {

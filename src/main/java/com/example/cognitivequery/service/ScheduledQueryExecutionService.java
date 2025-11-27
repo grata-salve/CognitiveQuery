@@ -1,6 +1,6 @@
 package com.example.cognitivequery.service;
 
-import com.example.cognitivequery.bot.handler.TelegramMessageHelper; // Import helper
+import com.example.cognitivequery.bot.handler.TelegramMessageHelper;
 import com.example.cognitivequery.model.AnalysisHistory;
 import com.example.cognitivequery.model.ScheduledQuery;
 import com.example.cognitivequery.repository.ScheduledQueryRepository;
@@ -29,10 +29,11 @@ public class ScheduledQueryExecutionService {
     @Setter
     private TelegramMessageHelper messageHelper;
 
-    @Scheduled(fixedRate = 60000) // Every minute (60,000 ms)
+    // Run every minute
+    @Scheduled(fixedRate = 60000)
     @Transactional
     public void processScheduledQueries() {
-        if (messageHelper == null) { // Check for messageHelper
+        if (messageHelper == null) {
             log.warn("TelegramMessageHelper instance is not set in ScheduledQueryExecutionService. Skipping execution.");
             return;
         }
@@ -55,8 +56,8 @@ public class ScheduledQueryExecutionService {
                 log.warn("Scheduled query ID {} references history without credentials or null history. Disabling.", scheduledQuery.getId());
                 scheduledQuery.setEnabled(false);
                 scheduledQueryRepository.save(scheduledQuery);
-                messageHelper.sendMessage(scheduledQuery.getChatIdToNotify(), // Use messageHelper
-                        "⚠️ Scheduled query '" + messageHelper.escapeMarkdownV2(scheduledQuery.getName() != null ? scheduledQuery.getName() : "ID: " + scheduledQuery.getId()) + // Use messageHelper
+                messageHelper.sendMessage(scheduledQuery.getChatIdToNotify(),
+                        "⚠️ Scheduled query '" + messageHelper.escapeMarkdownV2(scheduledQuery.getName() != null ? scheduledQuery.getName() : "ID: " + scheduledQuery.getId()) +
                                 "' was disabled due to missing DB credentials in the associated analysis history\\.");
                 MDC.remove("scheduledQueryId");
                 MDC.remove("telegramId");
@@ -66,40 +67,47 @@ public class ScheduledQueryExecutionService {
             try {
                 DynamicQueryExecutorService.QueryResult result = queryExecutorService.executeQuery(
                         history.getDbHost(), history.getDbPort(), history.getDbName(),
-                        history.getDbUser(), history.getDbPasswordEncrypted(), scheduledQuery.getSqlQuery());
+                        history.getDbUser(), history.getDbPasswordEncrypted(),
+                        scheduledQuery.getSqlQuery(),
+                        scheduledQuery.getAppUser().isDataModificationEnabled()
+                );
 
-                String queryName = messageHelper.escapeMarkdownV2(scheduledQuery.getName() != null ? scheduledQuery.getName() : "ID: " + scheduledQuery.getId()); // Use messageHelper
+                String queryName = messageHelper.escapeMarkdownV2(scheduledQuery.getName() != null ? scheduledQuery.getName() : "ID: " + scheduledQuery.getId());
 
                 if (result.isSuccess()) {
-                    messageHelper.sendMessage(scheduledQuery.getChatIdToNotify(), "📊 Results for scheduled query '" + queryName + "':"); // Use messageHelper
+                    messageHelper.sendMessage(scheduledQuery.getChatIdToNotify(), "📊 Results for scheduled query '" + queryName + "':");
                     if (result.type() == DynamicQueryExecutorService.QueryType.SELECT) {
                         @SuppressWarnings("unchecked")
                         List<Map<String, Object>> resultData = (List<Map<String, Object>>) result.data();
                         String outputFormat = scheduledQuery.getOutputFormat();
 
                         if ("csv".equals(outputFormat)) {
-                            messageHelper.sendSelectResultAsCsvFile(scheduledQuery.getChatIdToNotify(), resultData, history.getRepositoryUrl()); // Use messageHelper
+                            messageHelper.sendSelectResultAsCsvFile(scheduledQuery.getChatIdToNotify(), resultData, history.getRepositoryUrl());
+                        } else if ("excel".equals(outputFormat)) {
+                            messageHelper.sendSelectResultAsExcelFile(scheduledQuery.getChatIdToNotify(), resultData, history.getRepositoryUrl());
                         } else if ("txt".equals(outputFormat)) {
-                            messageHelper.sendSelectResultAsTxtFile(scheduledQuery.getChatIdToNotify(), resultData, history.getRepositoryUrl()); // Use messageHelper
+                            messageHelper.sendSelectResultAsTxtFile(scheduledQuery.getChatIdToNotify(), resultData, history.getRepositoryUrl());
                         } else { // text (default)
-                            messageHelper.sendSelectResultAsTextInChat(scheduledQuery.getChatIdToNotify(), resultData, history.getRepositoryUrl()); // Use messageHelper
+                            // Use the user's visualization setting for inline charts
+                            boolean allowCharts = scheduledQuery.getAppUser().isVisualizationEnabled();
+                            messageHelper.sendSelectResultAsTextInChat(scheduledQuery.getChatIdToNotify(), resultData, history.getRepositoryUrl(), allowCharts);
                         }
                     } else { // UPDATE, INSERT, DELETE
-                        messageHelper.sendMessage(scheduledQuery.getChatIdToNotify(), // Use messageHelper
+                        messageHelper.sendMessage(scheduledQuery.getChatIdToNotify(),
                                 "✅ Scheduled query '" + queryName +
                                         "' (non-SELECT) executed successfully\\. Rows affected: " + result.data());
                     }
                 } else {
                     log.error("Scheduled query ID {} for user {} failed: {}", scheduledQuery.getId(), scheduledQuery.getAppUser().getTelegramId(), result.errorMessage());
-                    messageHelper.sendMessage(scheduledQuery.getChatIdToNotify(), // Use messageHelper
+                    messageHelper.sendMessage(scheduledQuery.getChatIdToNotify(),
                             "❌ Scheduled query '" + queryName +
-                                    "' execution failed: " + messageHelper.escapeMarkdownV2(result.errorMessage())); // Use messageHelper
+                                    "' execution failed: " + messageHelper.escapeMarkdownV2(result.errorMessage()));
                 }
             } catch (Exception e) {
                 log.error("Unexpected error executing scheduled query ID {}", scheduledQuery.getId(), e);
-                messageHelper.sendMessage(scheduledQuery.getChatIdToNotify(), // Use messageHelper
+                messageHelper.sendMessage(scheduledQuery.getChatIdToNotify(),
                         "❌ An unexpected error occurred while running scheduled query '" +
-                                messageHelper.escapeMarkdownV2(scheduledQuery.getName() != null ? scheduledQuery.getName() : "ID: " + scheduledQuery.getId()) + "'\\."); // Use messageHelper
+                                messageHelper.escapeMarkdownV2(scheduledQuery.getName() != null ? scheduledQuery.getName() : "ID: " + scheduledQuery.getId()) + "'\\.");
             } finally {
                 scheduledQuery.setLastExecutedAt(now);
                 try {
@@ -110,8 +118,8 @@ public class ScheduledQueryExecutionService {
                 } catch (IllegalArgumentException e) {
                     log.error("Invalid CRON expression for scheduled query ID {}: {}. Disabling.", scheduledQuery.getId(), scheduledQuery.getCronExpression(), e);
                     scheduledQuery.setEnabled(false);
-                    messageHelper.sendMessage(scheduledQuery.getChatIdToNotify(), // Use messageHelper
-                            "❌ Scheduled query '" + messageHelper.escapeMarkdownV2(scheduledQuery.getName() != null ? scheduledQuery.getName() : "ID: " + scheduledQuery.getId()) + // Use messageHelper
+                    messageHelper.sendMessage(scheduledQuery.getChatIdToNotify(),
+                            "❌ Scheduled query '" + messageHelper.escapeMarkdownV2(scheduledQuery.getName() != null ? scheduledQuery.getName() : "ID: " + scheduledQuery.getId()) +
                                     "' has an invalid CRON expression and has been disabled\\.");
                 }
                 scheduledQueryRepository.save(scheduledQuery);

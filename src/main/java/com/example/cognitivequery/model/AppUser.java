@@ -49,6 +49,13 @@ public class AppUser {
     @OneToMany(mappedBy = "appUser", cascade = CascadeType.ALL, orphanRemoval = true, fetch = FetchType.LAZY)
     private List<AnalysisHistory> analysisHistories = new ArrayList<>();
 
+    @Column(nullable = false)
+    private boolean visualizationEnabled = true;
+    @Column(nullable = false)
+    private boolean aiInsightsEnabled = true;
+
+    @Column(nullable = false)
+    private boolean dataModificationEnabled = false;
 
     public AppUser(String telegramId) {
         this.telegramId = telegramId;

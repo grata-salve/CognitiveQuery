@@ -7,11 +7,16 @@ import com.example.cognitivequery.model.AppUser;
 import com.example.cognitivequery.model.ScheduledQuery;
 import com.example.cognitivequery.repository.AnalysisHistoryRepository;
 import com.example.cognitivequery.repository.ScheduledQueryRepository;
+import com.example.cognitivequery.repository.UserRepository;
 import com.example.cognitivequery.service.db.DynamicQueryExecutorService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.support.CronExpression;
 import org.springframework.stereotype.Service;
+import org.telegram.telegrambots.meta.api.methods.updatingmessages.EditMessageText;
 import org.telegram.telegrambots.meta.api.objects.CallbackQuery;
+import org.telegram.telegrambots.meta.api.objects.Message;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.InlineKeyboardMarkup;
+import org.telegram.telegrambots.meta.api.objects.replykeyboard.buttons.InlineKeyboardButton;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -29,17 +34,20 @@ public class BotCallbackHandler {
     private final DynamicQueryExecutorService queryExecutorService;
     private final BotInputHandler botInputHandler;
     private final ScheduledQueryRepository scheduledQueryRepository;
+    private final UserRepository userRepository;
 
     public BotCallbackHandler(BotStateService botStateService,
                               AnalysisHistoryRepository analysisHistoryRepository,
                               DynamicQueryExecutorService queryExecutorService,
                               BotInputHandler botInputHandler,
-                              ScheduledQueryRepository scheduledQueryRepository) {
+                              ScheduledQueryRepository scheduledQueryRepository,
+                              UserRepository userRepository) {
         this.botStateService = botStateService;
         this.analysisHistoryRepository = analysisHistoryRepository;
         this.queryExecutorService = queryExecutorService;
         this.botInputHandler = botInputHandler;
         this.scheduledQueryRepository = scheduledQueryRepository;
+        this.userRepository = userRepository;
     }
 
     public void handle(CallbackQuery callbackQuery, AppUser appUser,
@@ -62,10 +70,14 @@ public class BotCallbackHandler {
                 return;
             }
 
+            // 1. Execute SQL
             if (callbackData.startsWith("execute_sql:")) {
                 handleExecuteSqlCallback(callbackQuery, appUser, chatId, userId, callbackData, messageHelper, taskExecutor);
                 answerText = "Execution initiated...";
-            } else if (callbackData.startsWith("sched_hist:")) {
+            }
+
+            // 2. Schedule: History selection
+            else if (callbackData.startsWith("sched_hist:")) {
                 answerText = "History selected.";
                 String historyIdStrCallback = callbackData.substring("sched_hist:".length());
                 ScheduleCreationState state = botStateService.getScheduleCreationState(userId);
@@ -76,7 +88,10 @@ public class BotCallbackHandler {
                     showAlert = true;
                     messageHelper.sendMessage(chatId, "Session for creating schedule has expired. Please start over with `/schedule_query`");
                 }
-            } else if (callbackData.startsWith("sched_format:")) {
+            }
+
+            // 3. Schedule: Format selection
+            else if (callbackData.startsWith("sched_format:")) {
                 answerText = "Format selected.";
                 String formatCallback = callbackData.substring("sched_format:".length());
                 ScheduleCreationState state = botStateService.getScheduleCreationState(userId);
@@ -95,7 +110,176 @@ public class BotCallbackHandler {
                     showAlert = true;
                     messageHelper.sendMessage(chatId, "Session for creating schedule has expired. Please start over with `/schedule_query`");
                 }
-            } else if (callbackData.startsWith("pause_sched:")) {
+            }
+
+            // 4. Schedule: Frequency selection (Presets menu)
+            else if (callbackData.startsWith("sched_freq:")) {
+                String freq = callbackData.substring("sched_freq:".length());
+                ScheduleCreationState state = botStateService.getScheduleCreationState(userId);
+
+                if (state == null) {
+                    answerText = "Error: Session expired.";
+                    showAlert = true;
+                    messageHelper.sendMessage(chatId, "Session for creating schedule has expired. Please start over.");
+                } else {
+                    // Handle "Pick Time" button
+                    if ("picker".equals(freq)) {
+                        answerText = "Select Hour";
+                        botInputHandler.sendHourPicker(chatId, messageHelper);
+                        return;
+                    }
+                    // Handle "Back" button
+                    else if ("back_to_menu".equals(freq)) {
+                        answerText = "Back to menu";
+                        botInputHandler.handleScheduleSqlInput(chatId, userId, state.getSqlQuery(), state, messageHelper);
+                        return;
+                    }
+
+                    String cronExpression = null;
+                    String readableFreq = "";
+
+                    switch (freq) {
+                        case "daily_09":
+                            cronExpression = "0 0 9 * * *";
+                            readableFreq = "Daily at 09:00";
+                            break;
+                        case "daily_18":
+                            cronExpression = "0 0 18 * * *";
+                            readableFreq = "Daily at 18:00";
+                            break;
+                        case "weekly_mon":
+                            cronExpression = "0 0 9 * * MON";
+                            readableFreq = "Every Monday at 09:00";
+                            break;
+                        case "hourly":
+                            cronExpression = "0 0 * * * *";
+                            readableFreq = "Every hour";
+                            break;
+                        case "manual":
+                            answerText = "Waiting for manual input...";
+                            messageHelper.sendMessage(chatId, "⌨️ OK, please enter your custom **CRON expression** \\(e\\.g\\., `0 30 14 * * *`\\):");
+                            return; // Wait for text input
+                    }
+
+                    if (cronExpression != null) {
+                        answerText = "Frequency set.";
+                        state.setCronExpression(cronExpression);
+                        botStateService.setUserState(userId, com.example.cognitivequery.bot.model.UserState.WAITING_FOR_SCHEDULE_CHAT_ID);
+
+                        messageHelper.sendMessage(chatId, "✅ Schedule set to: " + readableFreq + " (`" + cronExpression + "`)\\.\n" +
+                                "Now, please enter the **Chat ID** where results should be sent\\. Type `this` to use the current chat\\.");
+                    }
+                }
+            }
+
+            // 5. Schedule: Hour Selection (Time Picker)
+            else if (callbackData.startsWith("cron_h:")) {
+                try {
+                    int hour = Integer.parseInt(callbackData.substring("cron_h:".length()));
+                    answerText = "Hour selected: " + hour;
+                    botInputHandler.sendMinutePicker(chatId, hour, messageHelper);
+                } catch (NumberFormatException e) {
+                    log.error("Invalid hour format: {}", callbackData);
+                }
+            }
+
+            // 6. Schedule: Minute Selection (Time Picker - Finish)
+            else if (callbackData.startsWith("cron_m:")) {
+                String[] parts = callbackData.substring("cron_m:".length()).split(":");
+                try {
+                    int hour = Integer.parseInt(parts[0]);
+                    int minute = Integer.parseInt(parts[1]);
+
+                    ScheduleCreationState state = botStateService.getScheduleCreationState(userId);
+                    if (state != null) {
+                        // Generate CRON: 0 min hour * * * (Daily)
+                        String cron = String.format("0 %d %d * * *", minute, hour);
+
+                        state.setCronExpression(cron);
+                        botStateService.setUserState(userId, com.example.cognitivequery.bot.model.UserState.WAITING_FOR_SCHEDULE_CHAT_ID);
+
+                        answerText = String.format("Time set to %02d:%02d", hour, minute);
+                        messageHelper.sendMessage(chatId, String.format("✅ Schedule set to: **Daily at %02d:%02d** (`%s`)\n\nNow, enter **Chat ID** (or type `this`):", hour, minute, cron));
+                    } else {
+                        messageHelper.sendAnswerCallbackQuery(callbackQueryId, "Session expired", true);
+                    }
+                } catch (Exception e) {
+                    log.error("Invalid time format: {}", callbackData);
+                }
+            }
+
+            // 7. Credentials Reuse Choice
+            else if (callbackData.startsWith("reuse_creds:")) {
+                String action = callbackData.substring("reuse_creds:".length());
+
+                if (botStateService.getUserState(userId) != com.example.cognitivequery.bot.model.UserState.WAITING_FOR_CREDENTIALS_REUSE_CHOICE) {
+                    messageHelper.sendAnswerCallbackQuery(callbackQueryId, "Session expired or invalid state.", true);
+                    return;
+                }
+
+                if ("yes".equals(action)) {
+                    answerText = "✅ Using saved credentials.";
+                    botInputHandler.handleCredentialsReuseChoice(chatId, userId, appUser, true, messageHelper, taskExecutor);
+                } else {
+                    answerText = "🆕 Entering new credentials.";
+                    botInputHandler.handleCredentialsReuseChoice(chatId, userId, appUser, false, messageHelper, taskExecutor);
+                }
+            }
+
+            // 8. Settings Toggle (/settings)
+            else if (callbackData.startsWith("settings:")) {
+                String action = callbackData.substring("settings:".length());
+
+                if ("toggle_viz".equals(action)) {
+                    boolean newState = !appUser.isVisualizationEnabled();
+                    appUser.setVisualizationEnabled(newState);
+                    userRepository.save(appUser);
+                    answerText = "Visualization turned " + (newState ? "ON" : "OFF");
+                } else if ("toggle_ai".equals(action)) {
+                    boolean newState = !appUser.isAiInsightsEnabled();
+                    appUser.setAiInsightsEnabled(newState);
+                    userRepository.save(appUser);
+                    answerText = "AI Insights turned " + (newState ? "ON" : "OFF");
+                } else if ("toggle_mod".equals(action)) {
+                    boolean newState = !appUser.isDataModificationEnabled();
+                    appUser.setDataModificationEnabled(newState);
+                    userRepository.save(appUser);
+                    answerText = "Data Modification turned " + (newState ? "ON" : "OFF");
+                }
+
+                refreshSettingsMessage((Message) callbackQuery.getMessage(), appUser, messageHelper);
+            }
+
+            // 9. Change DB Context (/list_schemas)
+            else if (callbackData.startsWith("set_context:")) {
+                String historyIdStr = callbackData.substring("set_context:".length());
+                try {
+                    long historyId = Long.parseLong(historyIdStr);
+
+                    Optional<AnalysisHistory> historyOpt = analysisHistoryRepository.findById(historyId);
+
+                    if (historyOpt.isPresent() && historyOpt.get().getAppUser().getId().equals(userId)) {
+                        botStateService.setUserQueryContextHistoryId(userId, historyId);
+                        botStateService.clearLastGeneratedSql(userId); // Clear conversation history
+
+                        AnalysisHistory h = historyOpt.get();
+                        String repoName = h.getRepositoryUrl();
+
+                        messageHelper.sendAnswerCallbackQuery(callbackQueryId, "Switched to: " + repoName, false);
+
+                        messageHelper.sendMessage(chatId, "🔌 **Context Switched!**\n\n" +
+                                "Now working with: `" + messageHelper.escapeMarkdownV2(repoName) + "`\n" +
+                                "Commands `/query` and `/show_schema` will apply to this database.");
+                    } else {
+                        messageHelper.sendAnswerCallbackQuery(callbackQueryId, "Error: Schema not found.", true);
+                    }
+                } catch (NumberFormatException e) {
+                    log.error("Invalid context ID: {}", historyIdStr);
+                }
+            }
+
+            // 10. Scheduled Query Management
+            else if (callbackData.startsWith("pause_sched:")) {
                 answerText = handlePauseSchedule(callbackData, appUser, chatId, messageHelper);
                 showAlert = answerText.startsWith("Error:");
             } else if (callbackData.startsWith("resume_sched:")) {
@@ -104,8 +288,7 @@ public class BotCallbackHandler {
             } else if (callbackData.startsWith("delete_sched:")) {
                 answerText = handleDeleteSchedule(callbackData, appUser, chatId, messageHelper);
                 showAlert = answerText.startsWith("Error:");
-            }
-            else {
+            } else {
                 log.warn("Received unknown callback data: {}", callbackData);
                 answerText = "Unknown action";
                 showAlert = true;
@@ -119,98 +302,12 @@ public class BotCallbackHandler {
         }
     }
 
-    private String handlePauseSchedule(String callbackData, AppUser appUser, long chatId, TelegramMessageHelper messageHelper) {
-        try {
-            long scheduleId = Long.parseLong(callbackData.substring("pause_sched:".length()));
-            Optional<ScheduledQuery> sqOpt = scheduledQueryRepository.findById(scheduleId);
-
-            if (sqOpt.isEmpty() || !Objects.equals(sqOpt.get().getAppUser().getId(), appUser.getId())) {
-                messageHelper.sendMessage(chatId, "Error: Schedule not found or you don't have permission.");
-                return "Error: Invalid schedule ID.";
-            }
-            ScheduledQuery sq = sqOpt.get();
-            if (!sq.isEnabled()) {
-                return "Already paused.";
-            }
-            sq.setEnabled(false);
-            scheduledQueryRepository.save(sq);
-            // Corrected message with escaped parentheses
-            messageHelper.sendMessage(chatId, "✅ Scheduled query `" + messageHelper.escapeMarkdownV2(sq.getName()) + "` \\(ID: " + sq.getId() + "\\) has been paused\\.");
-            return "Paused.";
-        } catch (NumberFormatException e) {
-            log.error("Invalid schedule ID format in callback: {}", callbackData, e);
-            return "Error: Invalid ID format.";
-        } catch (Exception e) {
-            log.error("Error pausing schedule: {}", callbackData, e);
-            return "Error: Could not pause.";
-        }
-    }
-
-    private String handleResumeSchedule(String callbackData, AppUser appUser, long chatId, TelegramMessageHelper messageHelper) {
-        try {
-            long scheduleId = Long.parseLong(callbackData.substring("resume_sched:".length()));
-            Optional<ScheduledQuery> sqOpt = scheduledQueryRepository.findById(scheduleId);
-
-            if (sqOpt.isEmpty() || !Objects.equals(sqOpt.get().getAppUser().getId(), appUser.getId())) {
-                messageHelper.sendMessage(chatId, "Error: Schedule not found or you don't have permission.");
-                return "Error: Invalid schedule ID.";
-            }
-            ScheduledQuery sq = sqOpt.get();
-            if (sq.isEnabled()) {
-                return "Already active.";
-            }
-            sq.setEnabled(true);
-            try {
-                CronExpression cron = CronExpression.parse(sq.getCronExpression());
-                LocalDateTime nextExecution = cron.next(LocalDateTime.now());
-                sq.setNextExecutionAt(nextExecution);
-                log.info("Resuming schedule ID {}. Next execution set to: {}", sq.getId(), nextExecution);
-            } catch (IllegalArgumentException e) {
-                log.error("Invalid CRON expression for schedule ID {} during resume: {}. Cannot set next execution.", sq.getId(), sq.getCronExpression(), e);
-                messageHelper.sendMessage(chatId, "⚠️ Schedule resumed, but there was an issue recalculating next run due to CRON: " + messageHelper.escapeMarkdownV2(e.getMessage()));
-            }
-            scheduledQueryRepository.save(sq);
-            // Corrected message with escaped parentheses and potentially for next run time
-            String nextRunTime = sq.getNextExecutionAt() != null ? messageHelper.escapeMarkdownV2(sq.getNextExecutionAt().toString()) : "ASAP";
-            messageHelper.sendMessage(chatId, "▶️ Scheduled query `" + messageHelper.escapeMarkdownV2(sq.getName()) + "` \\(ID: " + sq.getId() + "\\) has been resumed\\. Next run: `" + nextRunTime + "`");
-            return "Resumed.";
-        } catch (NumberFormatException e) {
-            log.error("Invalid schedule ID format in callback: {}", callbackData, e);
-            return "Error: Invalid ID format.";
-        } catch (Exception e) {
-            log.error("Error resuming schedule: {}", callbackData, e);
-            return "Error: Could not resume.";
-        }
-    }
-
-    private String handleDeleteSchedule(String callbackData, AppUser appUser, long chatId, TelegramMessageHelper messageHelper) {
-        try {
-            long scheduleId = Long.parseLong(callbackData.substring("delete_sched:".length()));
-            Optional<ScheduledQuery> sqOpt = scheduledQueryRepository.findById(scheduleId);
-
-            if (sqOpt.isEmpty() || !Objects.equals(sqOpt.get().getAppUser().getId(), appUser.getId())) {
-                messageHelper.sendMessage(chatId, "Error: Schedule not found or you don't have permission.");
-                return "Error: Invalid schedule ID.";
-            }
-            ScheduledQuery sq = sqOpt.get();
-            scheduledQueryRepository.deleteById(scheduleId);
-            // Corrected message with escaped parentheses
-            messageHelper.sendMessage(chatId, "🗑️ Scheduled query `" + messageHelper.escapeMarkdownV2(sq.getName()) + "` \\(ID: " + sq.getId() + "\\) has been deleted\\.");
-            return "Deleted.";
-        } catch (NumberFormatException e) {
-            log.error("Invalid schedule ID format in callback: {}", callbackData, e);
-            return "Error: Invalid ID format.";
-        } catch (Exception e) {
-            log.error("Error deleting schedule: {}", callbackData, e);
-            return "Error: Could not delete.";
-        }
-    }
+    // --- Private Methods ---
 
     private void handleExecuteSqlCallback(CallbackQuery callbackQuery, AppUser appUser, long chatId, long userId, String callbackData,
                                           TelegramMessageHelper messageHelper, ExecutorService taskExecutor) {
         String[] parts = callbackData.split(":");
-        if (parts.length != 3) { // execute_sql:historyId:format
-            log.error("Invalid callback data format for execute_sql: {}", callbackData);
+        if (parts.length != 3) {
             messageHelper.sendAnswerCallbackQuery(callbackQuery.getId(), "Error: Invalid action format", true);
             return;
         }
@@ -218,7 +315,6 @@ public class BotCallbackHandler {
         try {
             historyIdToExecute = Long.parseLong(parts[1]);
         } catch (NumberFormatException e) {
-            log.error("Invalid history ID in execute_sql callback: {}", parts[1]);
             messageHelper.sendAnswerCallbackQuery(callbackQuery.getId(), "Error: Invalid History ID", true);
             return;
         }
@@ -239,14 +335,12 @@ public class BotCallbackHandler {
         Optional<AnalysisHistory> historyOpt = analysisHistoryRepository.findById(historyIdToExecute);
         if (historyOpt.isEmpty() || !Objects.equals(historyOpt.get().getAppUser().getId(), appUser.getId())) {
             messageHelper.sendAnswerCallbackQuery(callbackQuery.getId(), "❌ Error: Invalid history!", true);
-            messageHelper.sendMessage(chatId, "❌ Cannot execute: Analysis history not found or invalid for your account\\.");
             return;
         }
 
         AnalysisHistory history = historyOpt.get();
         if (!history.hasCredentials()) {
             messageHelper.sendAnswerCallbackQuery(callbackQuery.getId(), "❌ Error: DB credentials missing!", true);
-            messageHelper.sendMessage(chatId, "❌ Cannot execute: DB credentials missing for this analysis history\\. Use `/set_db_credentials`\\.");
             return;
         }
 
@@ -259,13 +353,15 @@ public class BotCallbackHandler {
         final String repoUrlForFile = history.getRepositoryUrl();
         final String telegramIdStr = appUser.getTelegramId();
 
-
         taskExecutor.submit(() -> {
             org.slf4j.MDC.put("telegramId", telegramIdStr);
             try {
                 DynamicQueryExecutorService.QueryResult result = queryExecutorService.executeQuery(
                         history.getDbHost(), history.getDbPort(), history.getDbName(),
-                        history.getDbUser(), history.getDbPasswordEncrypted(), finalSql);
+                        history.getDbUser(), history.getDbPasswordEncrypted(),
+                        finalSql,
+                        appUser.isDataModificationEnabled()
+                );
 
                 if (result.isSuccess()) {
                     if (result.type() == DynamicQueryExecutorService.QueryType.SELECT) {
@@ -275,23 +371,135 @@ public class BotCallbackHandler {
                             messageHelper.sendSelectResultAsCsvFile(chatId, resultData, repoUrlForFile);
                         } else if ("txt".equals(finalFormat)) {
                             messageHelper.sendSelectResultAsTxtFile(chatId, resultData, repoUrlForFile);
+                        } else if ("excel".equals(finalFormat)) {
+                            messageHelper.sendSelectResultAsExcelFile(chatId, resultData, repoUrlForFile);
                         } else {
-                            messageHelper.sendSelectResultAsTextInChat(chatId, resultData, repoUrlForFile);
+                            // Corrected: Added 4th argument (allowCharts)
+                            messageHelper.sendSelectResultAsTextInChat(chatId, resultData, repoUrlForFile, appUser.isVisualizationEnabled());
                         }
                     } else if (result.type() == DynamicQueryExecutorService.QueryType.UPDATE) {
                         messageHelper.sendMessage(chatId, "✅ Query executed successfully\\. Rows affected: " + result.data());
-                    } else {
-                        messageHelper.sendMessage(chatId, "✅ Query executed, unknown result type\\.");
                     }
                 } else {
-                    messageHelper.sendMessage(chatId, "❌ Query execution failed: " + messageHelper.escapeMarkdownV2(result.errorMessage()));
+                    messageHelper.sendPlainTextMessage(chatId, "❌ Query execution failed: " + result.errorMessage());
                 }
             } catch (Exception e) {
                 log.error("Error executing SQL query '{}' for user {}", finalSql, userId, e);
-                messageHelper.sendMessage(chatId, "An unexpected error occurred during SQL execution: " + messageHelper.escapeMarkdownV2(e.getMessage()));
+                messageHelper.sendPlainTextMessage(chatId, "An unexpected error occurred during SQL execution: " + e.getMessage());
             } finally {
                 org.slf4j.MDC.remove("telegramId");
             }
         });
+    }
+
+    private void refreshSettingsMessage(Message message, AppUser appUser, TelegramMessageHelper messageHelper) {
+        String vizStatus = appUser.isVisualizationEnabled() ? "✅ ON" : "❌ OFF";
+        String aiStatus = appUser.isAiInsightsEnabled() ? "✅ ON" : "❌ OFF";
+        String modStatus = appUser.isDataModificationEnabled() ? "⚠️ ON" : "🔒 OFF";
+
+        String newText = String.format("""
+                ⚙️ **User Settings**
+                
+                📊 **Visualization:** %s
+                
+                💡 **AI Insights:** %s
+                
+                ✏️ **Data Modification:** %s
+                _(Allow INSERT, UPDATE, DELETE)_
+                
+                Tap to toggle:
+                """, vizStatus, aiStatus, modStatus);
+
+        InlineKeyboardMarkup markup = InlineKeyboardMarkup.builder()
+                .keyboardRow(List.of(
+                        InlineKeyboardButton.builder().text("📊 Viz").callbackData("settings:toggle_viz").build(),
+                        InlineKeyboardButton.builder().text("💡 AI").callbackData("settings:toggle_ai").build()
+                ))
+                .keyboardRow(List.of(
+                        InlineKeyboardButton.builder().text("✏️ Data Mod").callbackData("settings:toggle_mod").build()
+                ))
+                .build();
+
+        EditMessageText edit = EditMessageText.builder()
+                .chatId(String.valueOf(message.getChatId()))
+                .messageId(message.getMessageId())
+                .text(newText)
+                .parseMode("Markdown")
+                .replyMarkup(markup)
+                .build();
+
+        messageHelper.editMessage(edit);
+    }
+
+    private String handlePauseSchedule(String callbackData, AppUser appUser, long chatId, TelegramMessageHelper messageHelper) {
+        try {
+            long scheduleId = Long.parseLong(callbackData.substring("pause_sched:".length()));
+            Optional<ScheduledQuery> sqOpt = scheduledQueryRepository.findById(scheduleId);
+
+            if (sqOpt.isEmpty() || !Objects.equals(sqOpt.get().getAppUser().getId(), appUser.getId())) {
+                messageHelper.sendMessage(chatId, "Error: Schedule not found or you don't have permission.");
+                return "Error: Invalid schedule ID.";
+            }
+            ScheduledQuery sq = sqOpt.get();
+            if (!sq.isEnabled()) {
+                return "Already paused.";
+            }
+            sq.setEnabled(false);
+            scheduledQueryRepository.save(sq);
+            messageHelper.sendMessage(chatId, "✅ Scheduled query `" + messageHelper.escapeMarkdownV2(sq.getName()) + "` \\(ID: " + sq.getId() + "\\) has been paused\\.");
+            return "Paused.";
+        } catch (Exception e) {
+            log.error("Error pausing schedule: {}", callbackData, e);
+            return "Error: Could not pause.";
+        }
+    }
+
+    private String handleResumeSchedule(String callbackData, AppUser appUser, long chatId, TelegramMessageHelper messageHelper) {
+        try {
+            long scheduleId = Long.parseLong(callbackData.substring("resume_sched:".length()));
+            Optional<ScheduledQuery> sqOpt = scheduledQueryRepository.findById(scheduleId);
+
+            if (sqOpt.isEmpty() || !Objects.equals(sqOpt.get().getAppUser().getId(), appUser.getId())) {
+                messageHelper.sendMessage(chatId, "Error: Schedule not found.");
+                return "Error: Invalid schedule ID.";
+            }
+            ScheduledQuery sq = sqOpt.get();
+            if (sq.isEnabled()) {
+                return "Already active.";
+            }
+            sq.setEnabled(true);
+            try {
+                CronExpression cron = CronExpression.parse(sq.getCronExpression());
+                LocalDateTime nextExecution = cron.next(LocalDateTime.now());
+                sq.setNextExecutionAt(nextExecution);
+            } catch (Exception e) {
+                // ignore
+            }
+            scheduledQueryRepository.save(sq);
+            messageHelper.sendMessage(chatId, "▶️ Scheduled query `" + messageHelper.escapeMarkdownV2(sq.getName()) + "` has been resumed\\.");
+            return "Resumed.";
+        } catch (Exception e) {
+            log.error("Error resuming schedule", e);
+            return "Error: Could not resume.";
+        }
+    }
+
+    private String handleDeleteSchedule(String callbackData, AppUser appUser, long chatId, TelegramMessageHelper messageHelper) {
+        try {
+            long scheduleId = Long.parseLong(callbackData.substring("delete_sched:".length()));
+            Optional<ScheduledQuery> sqOpt = scheduledQueryRepository.findById(scheduleId);
+
+            if (sqOpt.isEmpty() || !Objects.equals(sqOpt.get().getAppUser().getId(), appUser.getId())) {
+                messageHelper.sendMessage(chatId, "Error: Schedule not found.");
+                return "Error: Invalid schedule ID.";
+            }
+            ScheduledQuery sq = sqOpt.get();
+            scheduledQueryRepository.deleteById(scheduleId);
+            messageHelper.sendMessage(chatId, "🗑️ Scheduled query `" + messageHelper.escapeMarkdownV2(sq.getName()) + "` has been deleted\\.");
+            return "Deleted.";
+        } catch (Exception e) {
+            log.error("Error deleting schedule", e);
+            return "Error: Could not delete.";
+        }
     }
 }

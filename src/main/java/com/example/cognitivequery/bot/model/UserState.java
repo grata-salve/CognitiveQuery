@@ -3,6 +3,7 @@ package com.example.cognitivequery.bot.model;
 public enum UserState {
     IDLE,
     WAITING_FOR_REPO_URL,
+    WAITING_FOR_CREDENTIALS_REUSE_CHOICE,
     WAITING_FOR_LLM_QUERY,
     WAITING_FOR_REPO_URL_FOR_CREDS,
     WAITING_FOR_DB_HOST,

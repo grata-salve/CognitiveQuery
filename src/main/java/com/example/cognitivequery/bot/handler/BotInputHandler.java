@@ -27,6 +27,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
@@ -74,7 +75,6 @@ public class BotInputHandler {
                 handleRepoUrlInput(chatId, userId, appUser, text, messageHelper, taskExecutor);
                 return true;
             case WAITING_FOR_REPO_URL_FOR_CREDS:
-                // WAITING_FOR_REPO_URL_FOR_CREDS does not need taskExecutor as analysis is not run
                 handleRepoUrlForCredsInput(chatId, userId, text, messageHelper);
                 return true;
             case WAITING_FOR_LLM_QUERY:
@@ -87,7 +87,6 @@ public class BotInputHandler {
         }
     }
 
-    // FIX: Added ExecutorService taskExecutor as a parameter
     public boolean processCredentialsInput(Message message, AppUser appUser, UserState currentState,
                                            TelegramMessageHelper messageHelper, ExecutorService taskExecutor) {
         long chatId = message.getChatId();
@@ -115,7 +114,6 @@ public class BotInputHandler {
                     botStateService.setUserState(userId, UserState.WAITING_FOR_DB_PORT);
                     messageHelper.sendMessage(chatId, "Got it\\. DB **port** \\(e\\.g\\., `5432`\\):");
                     break;
-                // ... other cases for WAITING_FOR_DB_PORT, WAITING_FOR_DB_NAME, WAITING_FOR_DB_USER ...
                 case WAITING_FOR_DB_PORT:
                     currentCreds.setPort(Integer.parseInt(text.trim()));
                     botStateService.setUserState(userId, UserState.WAITING_FOR_DB_NAME);
@@ -136,17 +134,14 @@ public class BotInputHandler {
                     Optional<String> encryptedPasswordOpt = encryptionService.encrypt(plainPassword);
                     if (encryptedPasswordOpt.isEmpty()) {
                         messageHelper.sendMessage(chatId, "Error encrypting password. Please try again or contact support.");
-                        // Don't reset state, so user can try again or admin sees the error.
-                        // Or reset to avoid getting stuck? Depends on policy. Keep for now.
                         log.error("Failed to encrypt password for user {}", userId);
-                        return true; // Error handled, but not successfully
+                        return true;
                     }
                     currentCreds.setEncryptedPassword(encryptedPasswordOpt.get());
                     log.info("Credentials input complete for user {}.", userId);
 
                     if (analysisInputFlow != null && analysisInputFlow.getRepoUrl() != null) {
                         log.info("Proceeding to analysis after credential input for /analyze_repo flow for user {}", userId);
-                        // FIX: Pass taskExecutor
                         performAnalysis(chatId, userId, appUser, analysisInputFlow, messageHelper, taskExecutor);
                     } else if (credsInputDirect != null && credsInputDirect.getAssociatedRepoUrl() != null) {
                         log.info("Processing credentials for /set_db_credentials flow for user {}", userId);
@@ -169,7 +164,7 @@ public class BotInputHandler {
                         log.error("Cannot determine flow after password input for user {}. No active analysis or direct credential setting flow.", userId);
                         messageHelper.sendMessage(chatId, "An internal error occurred determining the next step\\. Please try again\\.");
                     }
-                    botStateService.clearAllUserStates(userId); // Reset all states after successful input or flow determination
+                    botStateService.clearAllUserStates(userId);
                     break;
                 default:
                     log.warn("Unexpected state {} during credential input for user {}.", currentState, userId);
@@ -178,10 +173,9 @@ public class BotInputHandler {
             }
         } catch (NumberFormatException e) {
             messageHelper.sendMessage(chatId, "Invalid port number\\. Please enter a valid number\\.");
-            // Don't reset state, so user can correct port input
         } catch (Exception e) {
             log.error("Error processing credential input for user {}", userId, e);
-            botStateService.clearAllUserStates(userId); // Reset on general error
+            botStateService.clearAllUserStates(userId);
             messageHelper.sendMessage(chatId, "An error occurred during credential input: " + messageHelper.escapeMarkdownV2(e.getMessage()) + "\\. Please try again\\.");
         }
         return true;
@@ -206,15 +200,15 @@ public class BotInputHandler {
         AnalysisInputState input = botStateService.getAnalysisInputState(userId);
         if (input == null) {
             log.error("AnalysisInputState missing for user {} during repo URL input.", userId);
-            botStateService.clearUserState(userId); // Reset user state as input state is lost
+            botStateService.clearUserState(userId);
             messageHelper.sendMessage(chatId, "An internal error occurred with the analysis session\\. Please try starting the analysis again with `/analyze_repo`\\.");
             return;
         }
 
-        Matcher matcher = CognitiveQueryTelegramBot.GITHUB_URL_PATTERN.matcher(repoUrl.trim());
+        java.util.regex.Matcher matcher = CognitiveQueryTelegramBot.GITHUB_URL_PATTERN.matcher(repoUrl.trim());
         if (!matcher.matches()) {
             messageHelper.sendMessage(chatId, "Invalid GitHub URL format\\. Please enter a valid GitHub repository URL \\(e\\.g\\., `https://github.com/owner/repo`\\)\\.");
-            return; // Remain in WAITING_FOR_REPO_URL state
+            return;
         }
 
         input.setRepoUrl(repoUrl.trim());
@@ -249,19 +243,15 @@ public class BotInputHandler {
                             botStateService.clearAnalysisInputState(userId);
                         } else {
                             reason = "Previous result file missing at: " + existingSchemaPathStr;
-                            log.warn(reason + " for user {}", userId);
                         }
                     } catch (Exception e) {
                         reason = "Invalid stored schema path: " + existingSchemaPathStr;
-                        log.error(reason + " for user {}", userId, e);
                     }
                 } else {
                     reason = "Schema file path missing in the latest history record.";
-                    log.warn(reason + " for user {}", userId);
                 }
             } else {
                 reason = "Repository has been updated or commit hash mismatch. Latest analyzed: " + latestHistory.getCommitHash() + ", Current: " + currentCommitHash;
-                log.info(reason + " for user {}", userId);
             }
 
             if (needsAnalysis && latestHistory.hasCredentials()) {
@@ -273,52 +263,99 @@ public class BotInputHandler {
             }
         } else {
             reason = "New repository URL for this user.";
-            log.info(reason + " User: {}", userId);
         }
 
         if (needsAnalysis) {
             log.info("Proceeding with analysis for URL {} by user {}. Reason: {}", input.getRepoUrl(), userId, reason);
-            if (needsCredentials) {
-                botStateService.setUserState(userId, UserState.WAITING_FOR_DB_HOST);
-                AnalysisInputState currentInputState = botStateService.getOrCreateAnalysisInputState(userId);
-                currentInputState.setRepoUrl(input.getRepoUrl());
-                currentInputState.setCommitHash(input.getCommitHash());
-                currentInputState.setCredentials(new DbCredentialsInput());
 
-                messageHelper.sendMessage(chatId, "Analysis required for `" + escapedValidatedUrl + "`\\. " +
-                        (reason.isEmpty() ? "" : "_(" + messageHelper.escapeMarkdownV2(reason) + ")_ ") +
-                        "Please provide DB credentials\\.\nEnter DB **hostname** or **IP**:");
+            if (needsCredentials) {
+                // Check for last used credentials from ANY project
+                Optional<AnalysisHistory> lastCredsOpt = analysisHistoryRepository.findFirstByAppUserAndDbHostIsNotNullOrderByAnalyzedAtDesc(appUser);
+
+                if (lastCredsOpt.isPresent()) {
+                    AnalysisHistory lastCreds = lastCredsOpt.get();
+                    // Store these credentials in the temporary state
+                    input.setCredentials(DbCredentialsInput.fromHistory(lastCreds));
+
+                    botStateService.setUserState(userId, UserState.WAITING_FOR_CREDENTIALS_REUSE_CHOICE);
+
+                    String msg = String.format("Found DB credentials from your last analysis \\(repo: `%s`\\):\n" +
+                                    "Host: `%s`\nUser: `%s`\n\n" +
+                                    "Do you want to use them for this repository too\\?",
+                            messageHelper.escapeMarkdownV2(lastCreds.getRepositoryUrl()),
+                            messageHelper.escapeMarkdownV2(lastCreds.getDbHost()),
+                            messageHelper.escapeMarkdownV2(lastCreds.getDbUser()));
+
+                    InlineKeyboardMarkup markup = InlineKeyboardMarkup.builder()
+                            .keyboardRow(List.of(
+                                    InlineKeyboardButton.builder().text("✅ Yes, use saved").callbackData("reuse_creds:yes").build(),
+                                    InlineKeyboardButton.builder().text("🆕 No, enter new").callbackData("reuse_creds:no").build()
+                            ))
+                            .build();
+
+                    SendMessage sm = SendMessage.builder()
+                            .chatId(chatId)
+                            .text(msg)
+                            .parseMode("MarkdownV2")
+                            .replyMarkup(markup)
+                            .build();
+                    messageHelper.tryExecute(sm);
+                } else {
+                    // No history, start manual input
+                    startManualCredentialsInput(chatId, userId, messageHelper);
+                }
             } else {
+                // Credentials were found for THIS repo, proceed directly
                 log.info("Proceeding directly to analysis for {} by user {} using reused credentials.", input.getRepoUrl(), userId);
                 performAnalysis(chatId, userId, appUser, input, messageHelper, taskExecutor);
-                // State will be reset inside performAnalysis or after its completion if synchronous.
-                // Since performAnalysis is asynchronous, resetting states from it might be incorrect.
-                // Better if performAnalysis just does its job.
-                // Resetting WAITING_FOR_REPO_URL states should happen here, as we moved to the next step (analysis or credential request).
-                // However, if credentials are needed, we move to WAITING_FOR_DB_HOST, so don't reset everything.
-                // If direct analysis - after performAnalysis (in its callback or Future) or if performAnalysis doesn't throw errors,
-                // then it could be conditionally reset here, but it's risky.
-                // Keep state reset at the end of "needsAnalysis == false" branch or at the end of credential input.
-                // Here, if needsCredentials == false, performAnalysis is launched, and we expect it to complete.
-                // Resetting userState and analysisInputState here might be premature if performAnalysis hasn't finished.
-                // BUT! We already sent "Starting analysis...". The user shouldn't input anything else for this flow.
-                // Therefore, after launching performAnalysis, the current UserState.WAITING_FOR_REPO_URL can be considered completed.
-                botStateService.clearUserState(userId); // User is no longer in WAITING_FOR_REPO_URL
-                botStateService.clearAnalysisInputState(userId); // Data for this specific analysis has been passed
+                botStateService.clearUserState(userId);
+                botStateService.clearAnalysisInputState(userId);
             }
         }
-        // If needsAnalysis == false, states were already reset above.
     }
 
+    /**
+     * Called from BotCallbackHandler when Yes/No buttons are pressed for credential reuse.
+     */
+    public void handleCredentialsReuseChoice(long chatId, long userId, AppUser appUser, boolean reuse,
+                                             TelegramMessageHelper messageHelper, ExecutorService taskExecutor) {
+        if (reuse) {
+            AnalysisInputState input = botStateService.getAnalysisInputState(userId);
+            if (input != null && input.getCredentials() != null) {
+                messageHelper.sendMessage(chatId, "👌 Using saved credentials\\. Starting analysis\\.\\.\\.");
+                // Immediately start analysis
+                performAnalysis(chatId, userId, appUser, input, messageHelper, taskExecutor);
+                // Clear states
+                botStateService.clearUserState(userId);
+                botStateService.clearAnalysisInputState(userId);
+            } else {
+                messageHelper.sendMessage(chatId, "⚠️ Internal state error (credentials lost)\\. Please restart `/analyze_repo`\\.");
+                botStateService.clearAllUserStates(userId);
+            }
+        } else {
+            // User chose "No", start manual input
+            startManualCredentialsInput(chatId, userId, messageHelper);
+        }
+    }
+
+    /**
+     * Helper to start manual credentials input flow.
+     */
+    private void startManualCredentialsInput(long chatId, long userId, TelegramMessageHelper messageHelper) {
+        botStateService.setUserState(userId, UserState.WAITING_FOR_DB_HOST);
+        // Clear temporary credentials in the state
+        AnalysisInputState inputState = botStateService.getAnalysisInputState(userId);
+        if (inputState != null) {
+            inputState.setCredentials(new DbCredentialsInput());
+        }
+        messageHelper.sendMessage(chatId, "Please provide DB credentials\\.\nEnter DB **hostname** or **IP**:");
+    }
 
     private void performAnalysis(long chatId, long userId, AppUser appUser, AnalysisInputState input,
                                  TelegramMessageHelper messageHelper, ExecutorService taskExecutor) {
-        // FIX: Check taskExecutor and log
         if (taskExecutor == null) {
-            log.error("CRITICAL: TaskExecutor is NULL in performAnalysis for user {}. Analysis cannot proceed asynchronously. This is a bug in passing the executor.", userId);
+            log.error("CRITICAL: TaskExecutor is NULL in performAnalysis for user {}. Analysis cannot proceed asynchronously.", userId);
             messageHelper.sendMessage(chatId, "❌ A critical internal error occurred (executor missing)\\. Analysis cannot start\\. Please contact support\\.");
-            // Important: need to handle this situation. Cannot just continue.
-            // Can reset states so user doesn't get stuck.
             botStateService.clearAllUserStates(userId);
             return;
         }
@@ -341,9 +378,9 @@ public class BotInputHandler {
         messageHelper.sendMessage(chatId, "⏳ Starting analysis for " + escapedUrl + versionPart + "\\.\\.\\. This may take a while\\.");
 
         Runnable analysisTask = () -> {
-            String originalTelegramId = appUser.getTelegramId(); // For MDC within the thread
+            String originalTelegramId = appUser.getTelegramId();
             org.slf4j.MDC.put("telegramId", originalTelegramId);
-            org.slf4j.MDC.put("userId", String.valueOf(userId)); // For logs
+            org.slf4j.MDC.put("userId", String.valueOf(userId));
             org.slf4j.MDC.put("repoUrl", validatedUrl);
 
             Path resultSchemaPath = null;
@@ -418,7 +455,7 @@ public class BotInputHandler {
         ScheduleCreationState state = botStateService.getScheduleCreationState(userId);
         if (state == null) {
             messageHelper.sendMessage(chatId, "Error: Schedule creation process not found\\. Please start again with `/schedule_query`\\.");
-            botStateService.clearUserState(userId); // Reset only UserState, as ScheduleCreationState is already null
+            botStateService.clearUserState(userId);
             return true;
         }
 
@@ -536,14 +573,94 @@ public class BotInputHandler {
         }
     }
 
-    private void handleScheduleSqlInput(long chatId, long userId, String sql, ScheduleCreationState state, TelegramMessageHelper messageHelper) {
+    public void handleScheduleSqlInput(long chatId, long userId, String sql, ScheduleCreationState state, TelegramMessageHelper messageHelper) {
         if (sql.trim().isEmpty() || !sql.trim().toLowerCase().startsWith("select")) {
-            messageHelper.sendMessage(chatId, "❌ Invalid SQL query\\. It should start with `SELECT` and not be empty\\. Please try again:");
+            messageHelper.sendMessage(chatId, "❌ Invalid SQL query\\. It should start with `SELECT`\\. Try again:");
             return;
         }
         state.setSqlQuery(sql.trim());
         botStateService.setUserState(userId, UserState.WAITING_FOR_SCHEDULE_CRON);
-        messageHelper.sendMessage(chatId, "✅ SQL query set\\.\nNow, please enter the **CRON expression** for the schedule \\(e\\.g\\., `0 0 * * *` for daily at midnight, `0 12 * * MON-FRI` for noon on weekdays\\)\\.\nFor help with CRON, you can use an online generator like [crontab\\.guru](https://crontab.guru/)\\.");
+
+        InlineKeyboardMarkup markup = InlineKeyboardMarkup.builder()
+                .keyboardRow(List.of(
+                        InlineKeyboardButton.builder().text("⏰ Pick Time (Daily)").callbackData("sched_freq:picker").build()
+                ))
+                .keyboardRow(List.of(
+                        InlineKeyboardButton.builder().text("☀️ Morning (09:00)").callbackData("sched_freq:daily_09").build(),
+                        InlineKeyboardButton.builder().text("🌆 Evening (18:00)").callbackData("sched_freq:daily_18").build()
+                ))
+                .keyboardRow(List.of(
+                        InlineKeyboardButton.builder().text("📅 Mondays").callbackData("sched_freq:weekly_mon").build(),
+                        InlineKeyboardButton.builder().text("⏱️ Hourly").callbackData("sched_freq:hourly").build()
+                ))
+                .keyboardRow(List.of(
+                        InlineKeyboardButton.builder().text("⌨️ Manual CRON").callbackData("sched_freq:manual").build()
+                ))
+                .build();
+
+        SendMessage message = SendMessage.builder()
+                .chatId(chatId)
+                .text("✅ SQL set\\.\n\nSelect how often to run:")
+                .parseMode("MarkdownV2")
+                .replyMarkup(markup)
+                .build();
+
+        messageHelper.tryExecute(message);
+    }
+
+    // Helper method to display hour selection (00-23)
+    public void sendHourPicker(long chatId, TelegramMessageHelper messageHelper) {
+        var builder = InlineKeyboardMarkup.builder();
+
+        // Generate 4 rows of 6 buttons
+        for (int row = 0; row < 4; row++) {
+            List<InlineKeyboardButton> rowBtns = new ArrayList<>();
+            for (int col = 0; col < 6; col++) {
+                int hour = row * 6 + col;
+                String label = String.format("%02d:00", hour);
+                // callback: cron_h:<hour>
+                rowBtns.add(InlineKeyboardButton.builder().text(label).callbackData("cron_h:" + hour).build());
+            }
+            builder.keyboardRow(rowBtns);
+        }
+
+        // Back button
+        builder.keyboardRow(List.of(InlineKeyboardButton.builder().text("🔙 Back").callbackData("sched_freq:back_to_menu").build()));
+
+        SendMessage message = SendMessage.builder()
+                .chatId(chatId)
+                .text("⏰ **Select Hour (UTC/Server Time):**")
+                .parseMode("Markdown")
+                .replyMarkup(builder.build())
+                .build();
+        messageHelper.tryExecute(message);
+    }
+
+    // Helper method to display minute selection (00-55 in 5 min steps)
+    public void sendMinutePicker(long chatId, int selectedHour, TelegramMessageHelper messageHelper) {
+        var builder = InlineKeyboardMarkup.builder();
+
+        // Generate 3 rows of 4 buttons (5 min step: 00, 05, 10...)
+        for (int row = 0; row < 3; row++) {
+            List<InlineKeyboardButton> rowBtns = new ArrayList<>();
+            for (int col = 0; col < 4; col++) {
+                int minute = (row * 4 + col) * 5;
+                String label = String.format("%02d:%02d", selectedHour, minute);
+                // callback: cron_m:<hour>:<minute>
+                rowBtns.add(InlineKeyboardButton.builder().text(label).callbackData("cron_m:" + selectedHour + ":" + minute).build());
+            }
+            builder.keyboardRow(rowBtns);
+        }
+
+        builder.keyboardRow(List.of(InlineKeyboardButton.builder().text("🔙 Back").callbackData("sched_freq:picker").build()));
+
+        SendMessage message = SendMessage.builder()
+                .chatId(chatId)
+                .text(String.format("⏰ Selected Hour: **%02d**\nNow select **Minute**:", selectedHour))
+                .parseMode("Markdown")
+                .replyMarkup(builder.build())
+                .build();
+        messageHelper.tryExecute(message);
     }
 
     private void handleScheduleCronInput(long chatId, long userId, String cronExpressionStr, ScheduleCreationState state, TelegramMessageHelper messageHelper) {
@@ -575,11 +692,12 @@ public class BotInputHandler {
         var keyboardBuilder = InlineKeyboardMarkup.builder()
                 .keyboardRow(List.of(InlineKeyboardButton.builder().text("Text in Chat").callbackData("sched_format:text").build()))
                 .keyboardRow(List.of(InlineKeyboardButton.builder().text("TXT File").callbackData("sched_format:txt").build()))
-                .keyboardRow(List.of(InlineKeyboardButton.builder().text("CSV File").callbackData("sched_format:csv").build()));
+                .keyboardRow(List.of(InlineKeyboardButton.builder().text("CSV File").callbackData("sched_format:csv").build()))
+                .keyboardRow(List.of(InlineKeyboardButton.builder().text("Excel File").callbackData("sched_format:excel").build()));
 
         SendMessage messageWithKeyboard = SendMessage.builder()
                 .chatId(chatId)
-                .text("✅ Chat ID for notifications set to: `" + targetChatId + "`\\.\nFinally, choose the **output format** for the results or type one (`text`, `txt`, `csv`):")
+                .text("✅ Chat ID for notifications set to: `" + targetChatId + "`\\.\nFinally, choose the **output format** for the results or type one (`text`, `txt`, `csv`, `excel`):")
                 .parseMode("MarkdownV2")
                 .replyMarkup(keyboardBuilder.build())
                 .build();
@@ -588,7 +706,7 @@ public class BotInputHandler {
 
     private void handleScheduleOutputFormatInput(long chatId, long userId, AppUser appUser, String format, ScheduleCreationState state, TelegramMessageHelper messageHelper) {
         format = format.trim().toLowerCase();
-        if (!List.of("text", "txt", "csv").contains(format)) {
+        if (!List.of("text", "txt", "csv", "excel").contains(format)) {
             messageHelper.sendMessage(chatId, "❌ Invalid format\\. Please choose from `text`, `txt`, or `csv`, or use the buttons\\.");
             return;
         }
@@ -628,13 +746,11 @@ public class BotInputHandler {
         } catch (IllegalArgumentException e) {
             messageHelper.sendMessage(chatId, "❌ Invalid CRON expression: `" + messageHelper.escapeMarkdownV2(state.getCronExpression()) + "`\\. " + messageHelper.escapeMarkdownV2(e.getMessage()) + "\\. Please try again\\.");
             botStateService.setUserState(userId, UserState.WAITING_FOR_SCHEDULE_CRON); // Return to CRON step
-            // Don't clear ScheduleCreationState, so user can fix only CRON
             messageHelper.sendMessage(chatId, "Please re\\-enter the CRON expression:");
             return;
         } catch (Exception e) {
             log.error("Error saving scheduled query for user {}", userId, e);
             messageHelper.sendMessage(chatId, "❌ An error occurred while saving the scheduled query: " + messageHelper.escapeMarkdownV2(e.getMessage()) + "\\. Please try again\\.");
-            // On general error, reset all states as it's unclear what went wrong
         }
         botStateService.clearAllUserStates(userId);
     }
