@@ -57,6 +57,11 @@ public class AppUser {
     @Column(nullable = false)
     private boolean dataModificationEnabled = false;
 
+    @Column(nullable = false)
+    private boolean showSqlEnabled = false;
+    @Column(nullable = false)
+    private boolean dryRunEnabled = false;
+
     public AppUser(String telegramId) {
         this.telegramId = telegramId;
         this.provider = AuthProvider.TELEGRAM;

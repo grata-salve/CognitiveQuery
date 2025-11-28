@@ -272,6 +272,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         col.setFieldName(fieldName);
         col.setJavaType(fieldType);
         col.setSqlType(guessSqlType(fieldType));
+
         field.getAnnotationByName("Id").ifPresent(ann -> col.setPrimaryKey(true));
         field.getAnnotationByName("GeneratedValue").ifPresent(ann -> extractAnnotationAttribute(ann, "strategy").ifPresent(strategy -> col.setGenerationStrategy(strategy.replace("GenerationType.", ""))));
         field.getAnnotationByName("Column").ifPresent(ann -> {
@@ -282,34 +283,60 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
             extractAnnotationAttribute(ann, "precision").map(Integer::parseInt).ifPresent(col::setPrecision);
             extractAnnotationAttribute(ann, "scale").map(Integer::parseInt).ifPresent(col::setScale);
         });
-        if (col.getColumnName() == null) {
-            col.setColumnName(toSnakeCase(fieldName));
+
+        if (col.getColumnName() == null) col.setColumnName(toSnakeCase(fieldName));
+        if (col.getNullable() == null) col.setNullable(!col.isPrimaryKey());
+        if (col.getUnique() == null) col.setUnique(col.isPrimaryKey());
+
+        // --- ENUM DETERMINATION LOGIC ---
+        boolean isEnumAnnotationPresent = field.isAnnotationPresent("Enumerated");
+        boolean isEnumTypeResolved = false;
+
+        // Attempt to determine if the type is an Enum via SymbolSolver
+        if (resolvedType != null && resolvedType.isReferenceType()) {
+            try {
+                isEnumTypeResolved = resolvedType.asReferenceType().getTypeDeclaration()
+                        .map(ResolvedReferenceTypeDeclaration::isEnum)
+                        .orElse(false);
+            } catch (Exception e) {
+                log.warn("Failed to check if type is enum: {}", fieldType);
+            }
         }
-        if (col.getNullable() == null) {
-            col.setNullable(!col.isPrimaryKey());
-        }
-        if (col.getUnique() == null) {
-            col.setUnique(col.isPrimaryKey());
-        }
-        field.getAnnotationByName("Enumerated").ifPresent(ann -> {
+
+        // If it is an Enum (has annotation OR the type itself is resolved as Enum)
+        if (isEnumAnnotationPresent || isEnumTypeResolved) {
             col.setIsEnum(true);
             EnumInfo enumInfo = new EnumInfo();
-            String storage = extractAnnotationAttribute(ann, null).orElse("ORDINAL");
-            enumInfo.setStorageType(storage.replace("EnumType.", ""));
+
+            // 1. Determine storage type (ORDINAL or STRING)
+            if (isEnumAnnotationPresent) {
+                // If annotation exists, get it from there
+                String storage = extractAnnotationAttribute(field.getAnnotationByName("Enumerated").get(), null).orElse("ORDINAL");
+                enumInfo.setStorageType(storage.replace("EnumType.", ""));
+            } else {
+                // If no annotation, but it is an Enum -> JPA standard defaults to ORDINAL
+                enumInfo.setStorageType("ORDINAL");
+            }
+
+            // Correct SQL type
             col.setSqlType("STRING".equals(enumInfo.getStorageType()) ? "VARCHAR" : "INTEGER");
+
+            // 2. Extract constant values from the Java file
             if (resolvedType != null && resolvedType.isReferenceType()) {
-                try {
-                    resolvedType.asReferenceType().getTypeDeclaration().filter(ResolvedReferenceTypeDeclaration::isEnum).ifPresent(enumDecl -> enumInfo.setPossibleValues(enumDecl.asEnum().getEnumConstants().stream().map(constant -> constant.getName()).collect(Collectors.toList())));
-                } catch (Exception e) {
-                    log.warn("Could not resolve enum constants for type {}: {}", fieldType, e.getMessage());
+                List<String> values = resolveEnumConstants(resolvedType);
+                enumInfo.setPossibleValues(values);
+
+                if (!values.isEmpty()) {
+                    log.debug("Found Enum values for field '{}' ({}): {}", fieldName, enumInfo.getStorageType(), values);
                 }
             }
+
             if (enumInfo.getPossibleValues() == null) enumInfo.setPossibleValues(new ArrayList<>());
             col.setEnumInfo(enumInfo);
-        });
+        }
+
         return col;
     }
-
 
     private RelationshipInfo parseRelationship(FieldDeclaration field, String fieldName, String fieldType, ResolvedType resolvedFieldType) {
         RelationshipInfo rel = new RelationshipInfo();
@@ -321,7 +348,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
             String qualifiedName = resolvedFieldType.asReferenceType().getQualifiedName();
             if (qualifiedName.equals("java.util.List") || qualifiedName.equals("java.util.Set") || qualifiedName.equals("java.util.Collection") || qualifiedName.equals("java.lang.Iterable")) {
                 isCollection = true;
-                targetEntityType = getGenericTypeArgument(field, resolvedFieldType); // Static call OK
+                targetEntityType = getGenericTypeArgument(field, resolvedFieldType);
             }
         }
 
@@ -358,16 +385,16 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         rel.setTargetEntityJavaClass(targetEntityType);
 
         field.getAnnotationByName("JoinColumn").ifPresent(ann -> {
-            extractAnnotationAttribute(ann, "name").ifPresent(rel::setJoinColumnName); // Static call OK
+            extractAnnotationAttribute(ann, "name").ifPresent(rel::setJoinColumnName);
         });
         if (rel.isOwningSide() && rel.getJoinColumnName() == null && ("ManyToOne".equals(rel.getType()) || "OneToOne".equals(rel.getType()))) {
-            rel.setJoinColumnName(toSnakeCase(fieldName) + "_id"); // Static call OK
+            rel.setJoinColumnName(toSnakeCase(fieldName) + "_id");
         }
 
         field.getAnnotationByName("JoinTable").ifPresent(ann -> {
-            extractAnnotationAttribute(ann, "name").ifPresent(rel::setJoinTableName); // Static call OK
-            extractJoinColumnNameFromAnnotationExpr(ann, "joinColumns").ifPresent(rel::setJoinTableJoinColumnName); // Static call OK
-            extractJoinColumnNameFromAnnotationExpr(ann, "inverseJoinColumns").ifPresent(rel::setJoinTableInverseJoinColumnName); // Static call OK
+            extractAnnotationAttribute(ann, "name").ifPresent(rel::setJoinTableName);
+            extractJoinColumnNameFromAnnotationExpr(ann, "joinColumns").ifPresent(rel::setJoinTableJoinColumnName);
+            extractJoinColumnNameFromAnnotationExpr(ann, "inverseJoinColumns").ifPresent(rel::setJoinTableInverseJoinColumnName);
             if (rel.getMappedBy() == null && ("ManyToMany".equals(rel.getType()) || "OneToMany".equals(rel.getType()))) {
                 rel.setOwningSide(true);
             }
@@ -376,13 +403,13 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         return rel;
     }
 
-    private void parseCommonRelationshipAttributes(RelationshipInfo rel, AnnotationExpr ann) { // Instance method
-        extractAnnotationAttribute(ann, "mappedBy").ifPresent(rel::setMappedBy); // Static call OK
-        extractAnnotationAttribute(ann, "fetch").ifPresentOrElse( // Static call OK
+    private void parseCommonRelationshipAttributes(RelationshipInfo rel, AnnotationExpr ann) {
+        extractAnnotationAttribute(ann, "mappedBy").ifPresent(rel::setMappedBy);
+        extractAnnotationAttribute(ann, "fetch").ifPresentOrElse(
                 val -> rel.setFetchType(val.replace("FetchType.", "")),
                 () -> { /* Default set later */ }
         );
-        extractAnnotationAttributeList(ann, "cascade").ifPresent(rel::setCascadeTypes); // Static call OK
+        extractAnnotationAttributeList(ann, "cascade").ifPresent(rel::setCascadeTypes);
         if (rel.getFetchType() == null) {
             if ("ManyToOne".equals(rel.getType()) || "OneToOne".equals(rel.getType())) {
                 rel.setFetchType("EAGER");
@@ -403,10 +430,10 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
                 ResolvedReferenceType refType = resolvedType.asReferenceType();
                 if (refType.getQualifiedName().equals("java.util.Optional")) {
                     Optional<ResolvedType> typeParamOpt = refType.getTypeParametersMap().stream()
-                            .map(pair -> Optional.ofNullable(pair.b))               // Map to Optional<ResolvedType>
-                            .filter(Optional::isPresent) // Filter non-empty Optionals using lambda
-                            .map(Optional::get)          // Get ResolvedType from Optional
-                            .findFirst();                  // Get the first type parameter
+                            .map(pair -> Optional.ofNullable(pair.b))
+                            .filter(Optional::isPresent)
+                            .map(Optional::get)
+                            .findFirst();
                     if (typeParamOpt.isPresent()) {
                         return "Optional<" + getResolvedTypeName(typeParamOpt.get()) + ">";
                     } else {
@@ -419,7 +446,7 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
                 return resolvedType.asPrimitive().name().toLowerCase();
             } else if (resolvedType.isArray()) {
                 if (resolvedType.asArrayType().getComponentType().isPrimitive() &&
-                        resolvedType.asArrayType().getComponentType().equals(ResolvedPrimitiveType.BYTE)) {
+                    resolvedType.asArrayType().getComponentType().equals(ResolvedPrimitiveType.BYTE)) {
                     return "byte[]";
                 }
                 return getResolvedTypeName(resolvedType.asArrayType().getComponentType()) + "[]";
@@ -433,17 +460,16 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         }
     }
 
-    // *** ИСПРАВЛЕННЫЙ getGenericTypeArgument ***
     private static String getGenericTypeArgument(FieldDeclaration field, ResolvedType resolvedFieldType) {
         try {
             if (resolvedFieldType != null && resolvedFieldType.isReferenceType()) {
                 ResolvedReferenceType refType = resolvedFieldType.asReferenceType();
 
                 Optional<ResolvedType> typeArgOpt = refType.getTypeParametersMap().stream()
-                        .map(pair -> Optional.ofNullable(pair.b))         // Map to Optional<ResolvedType>
-                        .filter(Optional::isPresent) // Use lambda here
-                        .map(Optional::get)         // Extract ResolvedType
-                        .findFirst();                  // Get the first one
+                        .map(pair -> Optional.ofNullable(pair.b))
+                        .filter(Optional::isPresent)
+                        .map(Optional::get)
+                        .findFirst();
 
                 if (typeArgOpt.isPresent()) {
                     return getResolvedTypeName(typeArgOpt.get());
@@ -747,10 +773,6 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         }
     }
 
-    private void addIfNotPresent(List<ColumnInfo> list, ColumnInfo itemToAdd) {
-        addIfNotPresent(list, itemToAdd, false, null);
-    }
-
     private void addIfNotPresent(List<RelationshipInfo> list, RelationshipInfo itemToAdd, boolean inherited, String inheritedFrom) {
         if (list.stream().noneMatch(existing -> existing.getFieldName().equals(itemToAdd.getFieldName()))) {
             itemToAdd.setInherited(inherited);
@@ -766,5 +788,21 @@ public class JpaAnnotationVisitor extends VoidVisitorAdapter<Object> {
         private String javaClassName;
         private List<ColumnInfo> columns = new ArrayList<>();
         private List<RelationshipInfo> relationships = new ArrayList<>();
+    }
+
+    // Helper method to resolve enum constants
+    private List<String> resolveEnumConstants(ResolvedType resolvedType) {
+        try {
+            return resolvedType.asReferenceType()
+                    .getTypeDeclaration()
+                    .filter(ResolvedReferenceTypeDeclaration::isEnum)
+                    .map(decl -> decl.asEnum().getEnumConstants().stream()
+                            .map(c -> c.getName())
+                            .collect(Collectors.toList()))
+                    .orElse(new ArrayList<>());
+        } catch (Exception e) {
+            log.warn("Could not resolve enum constants: {}", e.getMessage());
+            return new ArrayList<>();
+        }
     }
 }

@@ -17,7 +17,8 @@ public enum UserState {
     WAITING_FOR_SCHEDULE_SQL,
     WAITING_FOR_SCHEDULE_CRON,
     WAITING_FOR_SCHEDULE_CHAT_ID,
-    WAITING_FOR_SCHEDULE_OUTPUT_FORMAT;
+    WAITING_FOR_SCHEDULE_OUTPUT_FORMAT,
+    WAITING_FOR_SCHEDULE_ALERT_CONDITION;
 
     public boolean isCredentialInputState() {
         return this == WAITING_FOR_DB_HOST || this == WAITING_FOR_DB_PORT ||
@@ -27,8 +28,9 @@ public enum UserState {
 
     public boolean isScheduleCreationState() {
         return this == WAITING_FOR_SCHEDULE_NAME || this == WAITING_FOR_SCHEDULE_HISTORY_CHOICE ||
-                this == WAITING_FOR_SCHEDULE_HISTORY_ID || this == WAITING_FOR_SCHEDULE_SQL ||
-                this == WAITING_FOR_SCHEDULE_CRON || this == WAITING_FOR_SCHEDULE_CHAT_ID ||
-                this == WAITING_FOR_SCHEDULE_OUTPUT_FORMAT;
+               this == WAITING_FOR_SCHEDULE_HISTORY_ID || this == WAITING_FOR_SCHEDULE_SQL ||
+               this == WAITING_FOR_SCHEDULE_CRON || this == WAITING_FOR_SCHEDULE_CHAT_ID ||
+               this == WAITING_FOR_SCHEDULE_OUTPUT_FORMAT ||
+               this == WAITING_FOR_SCHEDULE_ALERT_CONDITION;
     }
 }

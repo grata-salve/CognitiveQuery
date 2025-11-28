@@ -10,6 +10,7 @@ import com.example.cognitivequery.model.AppUser;
 import com.example.cognitivequery.model.ScheduledQuery;
 import com.example.cognitivequery.repository.AnalysisHistoryRepository;
 import com.example.cognitivequery.repository.ScheduledQueryRepository;
+import com.example.cognitivequery.repository.UserRepository;
 import com.example.cognitivequery.service.SchemaVisualizerService;
 import com.example.cognitivequery.service.db.DynamicQueryExecutorService;
 import com.example.cognitivequery.service.llm.GeminiService;
@@ -44,7 +45,7 @@ public class BotCommandHandler {
     private final ScheduledQueryRepository scheduledQueryRepository;
     private final SchemaVisualizerService schemaVisualizerService;
     private final DynamicQueryExecutorService queryExecutorService;
-
+    private final UserRepository userRepository;
 
     private final String backendApiBaseUrl;
 
@@ -57,7 +58,8 @@ public class BotCommandHandler {
             GeminiService geminiService,
             ScheduledQueryRepository scheduledQueryRepository,
             DynamicQueryExecutorService queryExecutorService,
-            SchemaVisualizerService schemaVisualizerService
+            SchemaVisualizerService schemaVisualizerService,
+            UserRepository userRepository
     ) {
         this.analysisHistoryRepository = analysisHistoryRepository;
         this.botStateService = botStateService;
@@ -67,6 +69,7 @@ public class BotCommandHandler {
         this.scheduledQueryRepository = scheduledQueryRepository;
         this.queryExecutorService = queryExecutorService;
         this.schemaVisualizerService = schemaVisualizerService;
+        this.userRepository = userRepository;
     }
 
     public void handle(Message message, AppUser appUser, String command, String commandArgs, String userFirstName,
@@ -125,50 +128,59 @@ public class BotCommandHandler {
 
     private void handleStartCommand(long chatId, String userFirstName, TelegramMessageHelper messageHelper) {
         messageHelper.sendMessage(chatId, "Hello, " + messageHelper.escapeMarkdownV2(userFirstName) + "\\! I'm CognitiveQuery bot\\.\n" +
-                "➡️ Use `/connect_github`\n" +
-                "➡️ Use `/analyze_repo`\n" +
-                "➡️ Use `/query <your question>`\n" +
-                "➡️ Use `/list_schemas` & `/use_schema <url>`\n" +
-                "➡️ Use `/set_db_credentials`\n" +
-                "➡️ Use `/schedule_query`");
+                                          "➡️ Use `/connect_github`\n" +
+                                          "➡️ Use `/analyze_repo`\n" +
+                                          "➡️ Use `/query <your question>`\n" +
+                                          "➡️ Use `/list_schemas` & `/use_schema <url>`\n" +
+                                          "➡️ Use `/set_db_credentials`\n" +
+                                          "➡️ Use `/schedule_query`");
     }
 
     private void handleHelpCommand(long chatId, TelegramMessageHelper messageHelper) {
         messageHelper.sendMessage(chatId, "Available commands:\n" +
-                "`/connect_github` \\- Link GitHub\n" +
-                "`/analyze_repo` \\- Analyze repository schema\n" +
-                "`/query <question>` \\- Ask about data \\(add `--csv` or `--txt` for file output\\)\n" +
-                "`/list_schemas` \\- List analyzed repositories\n" +
-                "`/use_schema <repo_url>` \\- Set context for `/query`\n" +
-                "`/set_db_credentials` \\- Set DB credentials for a repo\n" +
-                "`/schedule_query` \\- Create a new scheduled query\n" +
-                "`/list_scheduled_queries` \\- List your scheduled queries\n" +
-                "`/show_schema` \\- Visualize current DB schema\n" +
-                "`/help` \\- Show this message");
+                                          "`/connect_github` \\- Link GitHub\n" +
+                                          "`/analyze_repo` \\- Analyze repository schema\n" +
+                                          "`/query <question>` \\- Ask about data \\(add `--csv` or `--txt` for file output\\)\n" +
+                                          "`/list_schemas` \\- List analyzed repositories\n" +
+                                          "`/use_schema <repo_url>` \\- Set context for `/query`\n" +
+                                          "`/set_db_credentials` \\- Set DB credentials for a repo\n" +
+                                          "`/schedule_query` \\- Create a new scheduled query\n" +
+                                          "`/list_scheduled_queries` \\- List your scheduled queries\n" +
+                                          "`/show_schema` \\- Visualize current DB schema\n" +
+                                          "`/help` \\- Show this message");
     }
 
     private void handleSettingsCommand(long chatId, AppUser appUser, TelegramMessageHelper messageHelper) {
         String vizStatus = appUser.isVisualizationEnabled() ? "✅ ON" : "❌ OFF";
         String aiStatus = appUser.isAiInsightsEnabled() ? "✅ ON" : "❌ OFF";
         String modStatus = appUser.isDataModificationEnabled() ? "⚠️ ON" : "🔒 OFF";
+        String sqlStatus = appUser.isShowSqlEnabled() ? "👁️ ON" : "❌ OFF";
+        String dryStatus = appUser.isDryRunEnabled() ? "🚧 ON" : "❌ OFF";
 
         String text = String.format("""
                 ⚙️ **User Settings**
                 
                 📊 **Visualization:** %s
-                
                 💡 **AI Insights:** %s
-                
                 ✏️ **Data Modification:** %s
-                _(Allow INSERT, UPDATE, DELETE)_
+                
+                👁️ **Show SQL:** %s
+                _(Show generated code in chat)_
+                
+                🚧 **Dry Run Mode:** %s
+                _(Generate SQL ONLY, do not execute)_
                 
                 Tap to toggle:
-                """, vizStatus, aiStatus, modStatus);
+                """, vizStatus, aiStatus, modStatus, sqlStatus, dryStatus);
 
         InlineKeyboardMarkup markup = InlineKeyboardMarkup.builder()
                 .keyboardRow(List.of(
                         InlineKeyboardButton.builder().text("📊 Viz").callbackData("settings:toggle_viz").build(),
                         InlineKeyboardButton.builder().text("💡 AI").callbackData("settings:toggle_ai").build()
+                ))
+                .keyboardRow(List.of(
+                        InlineKeyboardButton.builder().text("👁️ Show SQL").callbackData("settings:toggle_show_sql").build(),
+                        InlineKeyboardButton.builder().text("🚧 Dry Run").callbackData("settings:toggle_dry_run").build()
                 ))
                 .keyboardRow(List.of(
                         InlineKeyboardButton.builder().text("✏️ Data Mod").callbackData("settings:toggle_mod").build()
@@ -200,7 +212,7 @@ public class BotCommandHandler {
                 String authUrl = response.get("authorizationUrl");
                 log.info("Received authorization URL (first 100 chars): {}...", authUrl.substring(0, Math.min(authUrl.length(), 100)));
                 String reply = "Please click the link below to authorize with GitHub:\n\n" + authUrl +
-                        "\n\nAfter authorization, you can use `/analyze_repo`\\.";
+                               "\n\nAfter authorization, you can use `/analyze_repo`\\.";
                 messageHelper.sendMessage(chatId, reply);
             } else {
                 log.error("Failed to get GitHub authorization URL. Response: {}", response);
@@ -297,11 +309,11 @@ public class BotCommandHandler {
             botStateService.setUserQueryContextHistoryId(appUser.getId(), historyOpt.get().getId());
 
             messageHelper.sendMessage(chatId, "✅ Query context set to: `" + messageHelper.escapeMarkdownV2(repoUrl) +
-                    "` \\(version: `" + messageHelper.escapeMarkdownV2(historyOpt.get().getCommitHash().substring(0, 7)) + "`\\)\\.\n" +
-                    "Now you can use `/query <your question>` and `/show_schema` for this database\\.");
+                                              "` \\(version: `" + messageHelper.escapeMarkdownV2(historyOpt.get().getCommitHash().substring(0, 7)) + "`\\)\\.\n" +
+                                              "Now you can use `/query <your question>` and `/show_schema` for this database\\.");
         } else {
             messageHelper.sendMessage(chatId, "❌ You haven't analyzed this repository yet: `" + messageHelper.escapeMarkdownV2(repoUrl) +
-                    "`\\.\nPlease use `/analyze_repo` first\\.");
+                                              "`\\.\nPlease use `/analyze_repo` first\\.");
         }
     }
 
@@ -314,7 +326,7 @@ public class BotCommandHandler {
     private void handleQueryCommand(long chatId, AppUser appUser, String queryTextWithPotentialFlag,
                                     TelegramMessageHelper messageHelper, ExecutorService taskExecutor) {
         boolean isJustAFlag = (queryTextWithPotentialFlag.equalsIgnoreCase(CognitiveQueryTelegramBot.CSV_FLAG) && queryTextWithPotentialFlag.length() == CognitiveQueryTelegramBot.CSV_FLAG.length()) ||
-                (queryTextWithPotentialFlag.equalsIgnoreCase(CognitiveQueryTelegramBot.TXT_FLAG) && queryTextWithPotentialFlag.length() == CognitiveQueryTelegramBot.TXT_FLAG.length());
+                              (queryTextWithPotentialFlag.equalsIgnoreCase(CognitiveQueryTelegramBot.TXT_FLAG) && queryTextWithPotentialFlag.length() == CognitiveQueryTelegramBot.TXT_FLAG.length());
 
         if (!queryTextWithPotentialFlag.isEmpty() && !isJustAFlag) {
             processUserQuery(chatId, appUser, queryTextWithPotentialFlag, messageHelper, taskExecutor);
@@ -330,6 +342,7 @@ public class BotCommandHandler {
         String outputFormat = "text";
         String queryForLlm = userQuery.trim();
 
+        // 1. Process format flags
         if (queryForLlm.toLowerCase().endsWith(" " + CognitiveQueryTelegramBot.CSV_FLAG)) {
             outputFormat = "csv";
             queryForLlm = queryForLlm.substring(0, queryForLlm.length() - (CognitiveQueryTelegramBot.CSV_FLAG.length() + 1)).trim();
@@ -346,6 +359,7 @@ public class BotCommandHandler {
             return;
         }
 
+        // 2. Determine DB context
         Long targetHistoryId = botStateService.getUserQueryContextHistoryId(appUser.getId());
         Optional<AnalysisHistory> targetHistoryOpt;
         String contextMessage;
@@ -373,6 +387,7 @@ public class BotCommandHandler {
             return;
         }
 
+        // 3. Read schema file
         String schemaPathStr = targetHistory.getSchemaFilePath();
         String schemaJson;
         try {
@@ -390,18 +405,20 @@ public class BotCommandHandler {
         final String finalOutputFormat = outputFormat;
         final String finalQueryForLlm = queryForLlm;
 
+        // 4. Asynchronous execution
         taskExecutor.submit(() -> {
             org.slf4j.MDC.put("telegramId", appUser.getTelegramId());
             try {
+                // Find conversational context
                 String previousSql = null;
                 String storedHistoryData = botStateService.getLastGeneratedSql(currentUserId);
 
-                // storedHistoryData is in the format "historyId:SQL"
                 if (storedHistoryData != null && storedHistoryData.startsWith(finalTargetHistoryId + ":")) {
                     previousSql = storedHistoryData.substring(String.valueOf(finalTargetHistoryId).length() + 1);
                     log.info("Found conversational context: {}", previousSql);
                 }
 
+                // Generate SQL
                 Optional<String> generatedSqlOpt = geminiService.generateSqlFromSchema(schemaJson, finalQueryForLlm, previousSql);
 
                 if (generatedSqlOpt.isEmpty()) {
@@ -411,7 +428,7 @@ public class BotCommandHandler {
 
                 String resultFromAi = generatedSqlOpt.get().trim();
 
-                // NEW CHECK: If AI indicates 'NO_DATA'
+                // Check for AI refusal to execute (NO_DATA)
                 if (resultFromAi.startsWith("NO_DATA:")) {
                     String explanation = resultFromAi.substring("NO_DATA:".length()).trim();
                     messageHelper.sendPlainTextMessage(chatId, "🤔 " + explanation);
@@ -419,9 +436,23 @@ public class BotCommandHandler {
                 }
 
                 String sqlToExecute = resultFromAi;
+
+                // --- SETTINGS LOGIC (Show SQL / Dry Run) ---
+                if (appUser.isDryRunEnabled()) {
+                    messageHelper.sendPlainTextMessage(chatId, "🚧 **Dry Run Mode (SQL Only):**\n\n" + sqlToExecute);
+                    botStateService.setLastGeneratedSql(currentUserId, finalTargetHistoryId + ":" + sqlToExecute);
+                    return; // Stop execution
+                }
+
+                if (appUser.isShowSqlEnabled()) {
+                    messageHelper.sendPlainTextMessage(chatId, "📝 **Generated SQL:**\n\n" + sqlToExecute);
+                }
+                // ---------------------------------------------
+
                 boolean success = false;
                 String lastError = "";
 
+                // Attempt loop (Self-healing)
                 for (int attempt = 1; attempt <= 2; attempt++) {
                     log.info("Executing SQL (Attempt {}): {}", attempt, sqlToExecute);
 
@@ -439,6 +470,8 @@ public class BotCommandHandler {
                         if (result.type() == DynamicQueryExecutorService.QueryType.SELECT) {
                             @SuppressWarnings("unchecked")
                             List<Map<String, Object>> data = (List<Map<String, Object>>) result.data();
+
+                            // Output results
                             if ("csv".equals(finalOutputFormat)) {
                                 messageHelper.sendSelectResultAsCsvFile(chatId, data, targetHistory.getRepositoryUrl());
                             } else if ("txt".equals(finalOutputFormat)) {
@@ -449,7 +482,7 @@ public class BotCommandHandler {
                                 messageHelper.sendSelectResultAsTextInChat(chatId, data, targetHistory.getRepositoryUrl(), appUser.isVisualizationEnabled());
                             }
 
-                            // AI INSIGHTS LOGIC
+                            // AI Insights
                             if ("text".equals(finalOutputFormat) && !data.isEmpty() && data.size() <= 50 && appUser.isAiInsightsEnabled()) {
                                 try {
                                     com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
@@ -473,9 +506,10 @@ public class BotCommandHandler {
                         if (attempt > 1) {
                             messageHelper.sendPlainTextMessage(chatId, "🔧 Note: I automatically fixed an SQL error in the initial query.");
                         }
-                        break;
+                        break; // Success
 
                     } else {
+                        // Error -> attempt to fix
                         lastError = result.errorMessage();
                         log.warn("SQL execution failed on attempt {}: {}", attempt, lastError);
 
@@ -487,7 +521,7 @@ public class BotCommandHandler {
                             if (fixedSqlOpt.isPresent()) {
                                 String res = fixedSqlOpt.get().trim();
                                 if ("ABORT_EXPLAIN".equals(res)) {
-                                    log.info("AI decided to abort self-correction and explain the error.");
+                                    log.info("AI decided to abort self-correction.");
                                     break;
                                 }
                                 sqlToExecute = res;
@@ -536,21 +570,25 @@ public class BotCommandHandler {
         for (ScheduledQuery sq : schedules) {
             String repoUrl = sq.getAnalysisHistory() != null ? sq.getAnalysisHistory().getRepositoryUrl() : "N/A (History Missing!)";
             String scheduleStatus = sq.isEnabled() ? "✅ Active" : "⏸️ Paused";
+            String alertInfo = sq.getAlertCondition() != null && !sq.getAlertCondition().isBlank()
+                    ? "\n*Alert:* `" + messageHelper.escapeMarkdownV2(sq.getAlertCondition()) + "`"
+                    : "";
 
             String text = String.format(
                     "*Name:* `%s` \\(%s\\)\n" +
-                            "*ID:* `%d`\n" +
-                            "*Repo:* `%s`\n" +
-                            "*CRON:* `%s`\n" +
-                            "*Next Run:* `%s`\n" +
-                            "*Output:* %s",
+                    "*ID:* `%d`\n" +
+                    "*Repo:* `%s`\n" +
+                    "*CRON:* `%s`\n" +
+                    "*Next Run:* `%s`\n" +
+                    "*Output:* %s%s",
                     messageHelper.escapeMarkdownV2(sq.getName() != null ? sq.getName() : "N/A"),
                     scheduleStatus,
                     sq.getId(),
                     messageHelper.escapeMarkdownV2(repoUrl),
                     messageHelper.escapeMarkdownV2(sq.getCronExpression()),
                     messageHelper.escapeMarkdownV2(sq.getNextExecutionAt() != null ? sq.getNextExecutionAt().format(DateTimeFormatter.ISO_LOCAL_DATE_TIME) : "N/A"),
-                    messageHelper.escapeMarkdownV2(sq.getOutputFormat())
+                    messageHelper.escapeMarkdownV2(sq.getOutputFormat()),
+                    alertInfo
             );
 
             List<InlineKeyboardButton> rowButtons = new ArrayList<>();
@@ -633,5 +671,104 @@ public class BotCommandHandler {
             log.error("Error visualizing schema for user {}", appUser.getId(), e);
             messageHelper.sendPlainTextMessage(chatId, "❌ Error generating schema diagram: " + e.getMessage());
         }
+    }
+
+    /**
+     * Magic method that understands everything.
+     */
+    public void handleNaturalLanguage(long chatId, AppUser appUser, String text,
+                                      TelegramMessageHelper messageHelper, ExecutorService taskExecutor) {
+
+        // 1. Quick check for URL (to avoid time on AI classification)
+        if (CognitiveQueryTelegramBot.GITHUB_URL_PATTERN.matcher(text.trim()).matches()) {
+            // Initiate analysis flow
+            botStateService.getOrCreateAnalysisInputState(appUser.getId());
+            botStateService.setUserState(appUser.getId(), UserState.WAITING_FOR_REPO_URL);
+            handleAnalyzeRepoCommand(chatId, appUser.getId(), appUser, messageHelper);
+            return;
+        }
+
+        // 2. Ask AI for intent classification
+        taskExecutor.submit(() -> {
+            org.slf4j.MDC.put("telegramId", appUser.getTelegramId());
+            try {
+                String intent = geminiService.determineIntent(text);
+                log.info("User input: '{}' -> Detected Intent: {}", text, intent);
+
+                switch (intent) {
+                    case "SHOW_SCHEMA":
+                        handleShowSchemaCommand(chatId, appUser, messageHelper);
+                        break;
+                    case "SETTINGS":
+                        String action = geminiService.extractSettingsAction(text);
+                        applySettingAction(chatId, appUser, action, messageHelper);
+                        break;
+                    case "ANALYZE_REPO":
+                        // If AI thinks it's a link, but the regex above failed
+                        handleAnalyzeRepoCommand(chatId, appUser.getId(), appUser, messageHelper);
+                        break;
+                    case "QUERY":
+                    default:
+                        // Assume everything else is a query
+                        processUserQuery(chatId, appUser, text, messageHelper, taskExecutor);
+                        break;
+                }
+            } catch (Exception e) {
+                log.error("Intent classification failed", e);
+                // Fallback to regular query
+                processUserQuery(chatId, appUser, text, messageHelper, taskExecutor);
+            } finally {
+                org.slf4j.MDC.remove("telegramId");
+            }
+        });
+    }
+
+    /**
+     * Applies settings change from voice/text input.
+     */
+    private void applySettingAction(long chatId, AppUser appUser, String action, TelegramMessageHelper messageHelper) {
+        if ("SHOW_MENU".equals(action)) {
+            handleSettingsCommand(chatId, appUser, messageHelper);
+            return;
+        }
+
+        String[] parts = action.split("=");
+        if (parts.length != 2) {
+            handleSettingsCommand(chatId, appUser, messageHelper);
+            return;
+        }
+
+        String key = parts[0];
+        boolean value = Boolean.parseBoolean(parts[1]);
+        String responseText = "";
+
+        switch (key) {
+            case "VIZ":
+                appUser.setVisualizationEnabled(value);
+                break;
+            case "AI":
+                appUser.setAiInsightsEnabled(value);
+                break;
+            case "MOD":
+                appUser.setDataModificationEnabled(value);
+                break;
+            case "SHOW_SQL":
+                appUser.setShowSqlEnabled(value);
+                break;
+            case "DRY_RUN":
+                appUser.setDryRunEnabled(value);
+                break;
+            default:
+                handleSettingsCommand(chatId, appUser, messageHelper);
+                return;
+        }
+
+        userRepository.save(appUser);
+
+        String emoji = value ? "✅" : "🚫";
+        messageHelper.sendMessage(chatId, String.format("%s Setting changed: **%s** is now **%s**", emoji, key, value ? "ON" : "OFF"));
+
+        // Show updated menu immediately
+        handleSettingsCommand(chatId, appUser, messageHelper);
     }
 }

@@ -1,5 +1,6 @@
 package com.example.cognitivequery.repository;
 
+import com.example.cognitivequery.model.AnalysisHistory;
 import com.example.cognitivequery.model.AppUser;
 import com.example.cognitivequery.model.ScheduledQuery;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -24,4 +25,6 @@ public interface ScheduledQueryRepository extends JpaRepository<ScheduledQuery, 
     // but doesn't harm and is good practice if relations are generally LAZY.
     @Query("SELECT sq FROM ScheduledQuery sq JOIN FETCH sq.analysisHistory WHERE sq.appUser = :appUser ORDER BY sq.createdAt DESC")
     List<ScheduledQuery> findByAppUserWithHistoryOrderByCreatedAtDesc(@Param("appUser") AppUser appUser);
+
+    List<ScheduledQuery> findAllByAnalysisHistory(AnalysisHistory analysisHistory);
 }

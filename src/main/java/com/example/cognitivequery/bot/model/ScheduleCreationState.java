@@ -12,4 +12,5 @@ public class ScheduleCreationState {
     private String cronExpression;
     private Long chatIdToNotify;
     private String outputFormat;
+    private String alertCondition;
 }

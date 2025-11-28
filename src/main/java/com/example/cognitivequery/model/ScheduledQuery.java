@@ -52,7 +52,10 @@ public class ScheduledQuery {
     private LocalDateTime updatedAt;
 
     @Column(length = 64) // For storing user's timezone if needed
-    private String timezoneId; // e.g., "Europe/Moscow"
+    private String timezoneId; // e.g., "Europe/Kyiv"
+
+    @Column(length = 1024)
+    private String alertCondition;
 
     public ScheduledQuery(AppUser appUser, AnalysisHistory analysisHistory, String sqlQuery, String cronExpression, Long chatIdToNotify, String outputFormat, String name) {
         this.appUser = appUser;

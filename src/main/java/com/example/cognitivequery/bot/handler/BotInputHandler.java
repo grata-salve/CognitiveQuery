@@ -280,8 +280,8 @@ public class BotInputHandler {
                     botStateService.setUserState(userId, UserState.WAITING_FOR_CREDENTIALS_REUSE_CHOICE);
 
                     String msg = String.format("Found DB credentials from your last analysis \\(repo: `%s`\\):\n" +
-                                    "Host: `%s`\nUser: `%s`\n\n" +
-                                    "Do you want to use them for this repository too\\?",
+                                               "Host: `%s`\nUser: `%s`\n\n" +
+                                               "Do you want to use them for this repository too\\?",
                             messageHelper.escapeMarkdownV2(lastCreds.getRepositoryUrl()),
                             messageHelper.escapeMarkdownV2(lastCreds.getDbHost()),
                             messageHelper.escapeMarkdownV2(lastCreds.getDbUser()));
@@ -354,8 +354,8 @@ public class BotInputHandler {
     private void performAnalysis(long chatId, long userId, AppUser appUser, AnalysisInputState input,
                                  TelegramMessageHelper messageHelper, ExecutorService taskExecutor) {
         if (taskExecutor == null) {
-            log.error("CRITICAL: TaskExecutor is NULL in performAnalysis for user {}. Analysis cannot proceed asynchronously.", userId);
-            messageHelper.sendMessage(chatId, "❌ A critical internal error occurred (executor missing)\\. Analysis cannot start\\. Please contact support\\.");
+            log.error("CRITICAL: TaskExecutor is NULL in performAnalysis for user {}.", userId);
+            messageHelper.sendMessage(chatId, "❌ A critical internal error occurred (executor missing)\\.");
             botStateService.clearAllUserStates(userId);
             return;
         }
@@ -367,8 +367,7 @@ public class BotInputHandler {
         if (credentials == null || credentials.getEncryptedPassword() == null) {
             log.error("Credentials missing in performAnalysis for user {}.", userId);
             messageHelper.sendMessage(chatId, "Error: DB credentials missing for analysis\\.");
-            botStateService.clearAnalysisInputState(userId);
-            botStateService.clearUserState(userId);
+            botStateService.clearAllUserStates(userId);
             return;
         }
 
@@ -400,6 +399,7 @@ public class BotInputHandler {
                 log.info("Analysis successful for user {}, repo {}. Schema path: {}", userId, validatedUrl, resultSchemaPath);
 
                 try {
+                    // 1. Save new history
                     AnalysisHistory newHistory = new AnalysisHistory(appUser, validatedUrl, commitHashToSave, resultSchemaPath.toString());
                     newHistory.setDbHost(credentials.getHost());
                     newHistory.setDbPort(credentials.getPort());
@@ -409,38 +409,44 @@ public class BotInputHandler {
                     AnalysisHistory savedHistory = analysisHistoryRepository.save(newHistory);
                     log.info("Saved new analysis history record ID: {} for user {}", savedHistory.getId(), userId);
 
+                    // 2. Fix FK Violation: update links in schedules and delete old records
                     if (!oldHistories.isEmpty()) {
+                        for (AnalysisHistory oldHistory : oldHistories) {
+                            List<ScheduledQuery> linkedSchedules = scheduledQueryRepository.findAllByAnalysisHistory(oldHistory);
+                            for (ScheduledQuery sq : linkedSchedules) {
+                                log.info("Migrating schedule ID {} to new history ID {}", sq.getId(), savedHistory.getId());
+                                sq.setAnalysisHistory(savedHistory);
+                                scheduledQueryRepository.save(sq);
+                            }
+                        }
+                        // Delete old records
                         analysisHistoryRepository.deleteAll(oldHistories);
-                        log.info("Deleted {} old history records for URL {} by user {}.", oldHistories.size(), validatedUrl, userId);
+                        log.info("Deleted {} old history records.", oldHistories.size());
                     }
 
+                    // 3. Delete old schema file
                     if (oldSchemaPathToDelete != null && !oldSchemaPathToDelete.isBlank() && !oldSchemaPathToDelete.equals(resultSchemaPath.toString())) {
                         try {
-                            if (Files.deleteIfExists(Paths.get(oldSchemaPathToDelete))) {
-                                log.info("Deleted previous schema file: {} for user {}", oldSchemaPathToDelete, userId);
-                            }
+                            Files.deleteIfExists(Paths.get(oldSchemaPathToDelete));
                         } catch (Exception eDel) {
-                            log.error("Failed to delete previous schema file: {} for user {}", oldSchemaPathToDelete, userId, eDel);
+                            log.error("Failed to delete old schema file", eDel);
                         }
                     }
+
+                    // 4. Final steps
                     botStateService.setUserQueryContextHistoryId(appUser.getId(), savedHistory.getId());
-                    messageHelper.sendMessage(chatId, "✅ Analysis successful\\! Schema saved\\.\nRepository: " + escapedUrl + "\nQuery context automatically set\\.\nUse `/query <your question>`");
+                    messageHelper.sendMessage(chatId, "✅ Analysis successful\\! Schema saved\\.\nRepository: " + escapedUrl + "\nQuery context set\\.\nUse `/query <your question>`");
+
                 } catch (Exception dbEx) {
-                    log.error("Failed to save/cleanup analysis results in DB for user {}, repo {}", userId, validatedUrl, dbEx);
-                    messageHelper.sendMessage(chatId, "⚠️ Analysis done, but failed to save results/cleanup database records\\.");
+                    log.error("Failed to save analysis results in DB", dbEx);
+                    messageHelper.sendPlainTextMessage(chatId, "⚠️ Analysis done, but failed to update database records: " + dbEx.getMessage());
                 }
             } catch (Exception analysisEx) {
-                log.error("Analysis failed for user {}, URL {}", userId, validatedUrl, analysisEx);
+                log.error("Analysis failed", analysisEx);
                 String reasonMsg = analysisEx.getMessage() != null ? analysisEx.getMessage() : "Unknown error";
-                if (analysisEx.getCause() != null && analysisEx.getCause().getMessage() != null) {
-                    reasonMsg += " \\(Cause: " + analysisEx.getCause().getMessage() + "\\)";
-                }
                 messageHelper.sendMessage(chatId, "❌ Analysis failed for repository: " + escapedUrl + "\nReason: " + messageHelper.escapeMarkdownV2(reasonMsg));
             } finally {
-                log.info("Analysis task finished for user {}, repo {}", userId, validatedUrl);
-                org.slf4j.MDC.remove("repoUrl");
-                org.slf4j.MDC.remove("userId");
-                org.slf4j.MDC.remove("telegramId");
+                org.slf4j.MDC.clear();
             }
         };
         taskExecutor.submit(analysisTask);
@@ -474,6 +480,9 @@ public class BotInputHandler {
                 break;
             case WAITING_FOR_SCHEDULE_CHAT_ID:
                 handleScheduleChatIdInput(chatId, userId, text, state, messageHelper);
+                break;
+            case WAITING_FOR_SCHEDULE_ALERT_CONDITION:
+                handleScheduleAlertInput(chatId, userId, text, state, messageHelper);
                 break;
             case WAITING_FOR_SCHEDULE_OUTPUT_FORMAT:
                 handleScheduleOutputFormatInput(chatId, userId, appUser, text, state, messageHelper);
@@ -674,6 +683,41 @@ public class BotInputHandler {
         }
     }
 
+    private void handleScheduleAlertInput(long chatId, long userId, String alertText, ScheduleCreationState state, TelegramMessageHelper messageHelper) {
+        // Handle "skip" callback from the button
+        if (alertText.trim().toLowerCase().contains("skip")) { // Check for "skip" text, anticipating that the text comes from the button or user input
+            state.setAlertCondition(null); // Explicitly clear/set to null
+            askForOutputFormat(chatId, userId, messageHelper);
+            return;
+        }
+
+        // Validate basic condition format (simple check to avoid obvious garbage)
+        if (alertText.trim().toLowerCase().matches(".*(>|<|=|!=|is)\\s*['\"\\w\\d].*")) {
+            state.setAlertCondition(alertText.trim());
+            askForOutputFormat(chatId, userId, messageHelper);
+        } else {
+            messageHelper.sendMessage(chatId, "⚠️ Invalid alert condition format\\. Please enter a valid comparison (e\\.g\\., `count > 0` or `status = 'ERROR'`), or click the skip button\\.");
+        }
+    }
+
+    public void askForOutputFormat(long chatId, long userId, TelegramMessageHelper messageHelper) {
+        botStateService.setUserState(userId, UserState.WAITING_FOR_SCHEDULE_OUTPUT_FORMAT);
+
+        var keyboardBuilder = InlineKeyboardMarkup.builder()
+                .keyboardRow(List.of(InlineKeyboardButton.builder().text("Text in Chat").callbackData("sched_format:text").build()))
+                .keyboardRow(List.of(InlineKeyboardButton.builder().text("TXT File").callbackData("sched_format:txt").build()))
+                .keyboardRow(List.of(InlineKeyboardButton.builder().text("CSV File").callbackData("sched_format:csv").build()))
+                .keyboardRow(List.of(InlineKeyboardButton.builder().text("Excel File").callbackData("sched_format:excel").build()));
+
+        SendMessage messageWithKeyboard = SendMessage.builder()
+                .chatId(chatId)
+                .text("✅ Alert condition set\\.\nFinally, choose the **output format** for the results or type one (`text`, `txt`, `csv`, `excel`):")
+                .parseMode("MarkdownV2")
+                .replyMarkup(keyboardBuilder.build())
+                .build();
+        messageHelper.tryExecute(messageWithKeyboard);
+    }
+
     private void handleScheduleChatIdInput(long chatId, long userId, String chatIdStr, ScheduleCreationState state, TelegramMessageHelper messageHelper) {
         long targetChatId;
         if ("this".equalsIgnoreCase(chatIdStr.trim())) {
@@ -687,21 +731,25 @@ public class BotInputHandler {
             }
         }
         state.setChatIdToNotify(targetChatId);
-        botStateService.setUserState(userId, UserState.WAITING_FOR_SCHEDULE_OUTPUT_FORMAT);
 
-        var keyboardBuilder = InlineKeyboardMarkup.builder()
-                .keyboardRow(List.of(InlineKeyboardButton.builder().text("Text in Chat").callbackData("sched_format:text").build()))
-                .keyboardRow(List.of(InlineKeyboardButton.builder().text("TXT File").callbackData("sched_format:txt").build()))
-                .keyboardRow(List.of(InlineKeyboardButton.builder().text("CSV File").callbackData("sched_format:csv").build()))
-                .keyboardRow(List.of(InlineKeyboardButton.builder().text("Excel File").callbackData("sched_format:excel").build()));
+        // Transition to alert condition setting
+        botStateService.setUserState(userId, UserState.WAITING_FOR_SCHEDULE_ALERT_CONDITION);
 
-        SendMessage messageWithKeyboard = SendMessage.builder()
-                .chatId(chatId)
-                .text("✅ Chat ID for notifications set to: `" + targetChatId + "`\\.\nFinally, choose the **output format** for the results or type one (`text`, `txt`, `csv`, `excel`):")
-                .parseMode("MarkdownV2")
-                .replyMarkup(keyboardBuilder.build())
+        InlineKeyboardMarkup markup = InlineKeyboardMarkup.builder()
+                .keyboardRow(List.of(
+                        InlineKeyboardButton.builder().text("⏭️ No Alert (Always Send)").callbackData("sched_alert:skip").build()
+                ))
                 .build();
-        messageHelper.tryExecute(messageWithKeyboard);
+
+        SendMessage msg = SendMessage.builder()
+                .chatId(chatId)
+                .text("🔔 **Smart Alerting**\n\nDo you want to receive this report **only** when a condition is met?\n" +
+                      "Example: `count > 0` or `status is 'CRITICAL'`\n\n" +
+                      "Send the condition text OR click Skip to receive always.")
+                .parseMode("Markdown")
+                .replyMarkup(markup)
+                .build();
+        messageHelper.tryExecute(msg);
     }
 
     private void handleScheduleOutputFormatInput(long chatId, long userId, AppUser appUser, String format, ScheduleCreationState state, TelegramMessageHelper messageHelper) {
@@ -728,7 +776,6 @@ public class BotInputHandler {
             AnalysisHistory history = analysisHistoryRepository.findById(state.getAnalysisHistoryId())
                     .orElseThrow(() -> new IllegalStateException("AnalysisHistory not found when saving schedule: " + state.getAnalysisHistoryId() + " for user " + userId));
 
-
             ScheduledQuery newScheduledQuery = new ScheduledQuery(
                     appUser,
                     history,
@@ -741,11 +788,25 @@ public class BotInputHandler {
             newScheduledQuery.setNextExecutionAt(nextExecution);
             newScheduledQuery.setEnabled(true);
 
+            // Save alert condition if set
+            if (state.getAlertCondition() != null && !state.getAlertCondition().isBlank()) {
+                newScheduledQuery.setAlertCondition(state.getAlertCondition());
+            }
+
             scheduledQueryRepository.save(newScheduledQuery);
-            messageHelper.sendMessage(chatId, "✅ Scheduled query '" + messageHelper.escapeMarkdownV2(state.getName()) + "' created successfully\\! Next execution: `" + messageHelper.escapeMarkdownV2(nextExecution.toString()) + "`");
+
+            // Format success message
+            String alertInfo = (state.getAlertCondition() != null)
+                    ? "\n🔔 Alert Condition: `" + messageHelper.escapeMarkdownV2(state.getAlertCondition()) + "`"
+                    : "";
+
+            messageHelper.sendMessage(chatId, "✅ Scheduled query '" + messageHelper.escapeMarkdownV2(state.getName()) +
+                                              "' created successfully\\!" + alertInfo +
+                                              "\nNext execution: `" + messageHelper.escapeMarkdownV2(nextExecution.toString()) + "`");
+
         } catch (IllegalArgumentException e) {
             messageHelper.sendMessage(chatId, "❌ Invalid CRON expression: `" + messageHelper.escapeMarkdownV2(state.getCronExpression()) + "`\\. " + messageHelper.escapeMarkdownV2(e.getMessage()) + "\\. Please try again\\.");
-            botStateService.setUserState(userId, UserState.WAITING_FOR_SCHEDULE_CRON); // Return to CRON step
+            botStateService.setUserState(userId, UserState.WAITING_FOR_SCHEDULE_CRON);
             messageHelper.sendMessage(chatId, "Please re\\-enter the CRON expression:");
             return;
         } catch (Exception e) {

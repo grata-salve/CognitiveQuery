@@ -24,6 +24,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ExecutorService;
+import java.util.stream.Collectors;
 
 @Service
 @Slf4j
@@ -167,7 +168,7 @@ public class BotCallbackHandler {
                         botStateService.setUserState(userId, com.example.cognitivequery.bot.model.UserState.WAITING_FOR_SCHEDULE_CHAT_ID);
 
                         messageHelper.sendMessage(chatId, "✅ Schedule set to: " + readableFreq + " (`" + cronExpression + "`)\\.\n" +
-                                "Now, please enter the **Chat ID** where results should be sent\\. Type `this` to use the current chat\\.");
+                                                          "Now, please enter the **Chat ID** where results should be sent\\. Type `this` to use the current chat\\.");
                     }
                 }
             }
@@ -245,6 +246,16 @@ public class BotCallbackHandler {
                     appUser.setDataModificationEnabled(newState);
                     userRepository.save(appUser);
                     answerText = "Data Modification turned " + (newState ? "ON" : "OFF");
+                } else if ("toggle_show_sql".equals(action)) {
+                    boolean newState = !appUser.isShowSqlEnabled();
+                    appUser.setShowSqlEnabled(newState);
+                    userRepository.save(appUser);
+                    answerText = "Show SQL turned " + (newState ? "ON" : "OFF");
+                } else if ("toggle_dry_run".equals(action)) {
+                    boolean newState = !appUser.isDryRunEnabled();
+                    appUser.setDryRunEnabled(newState);
+                    userRepository.save(appUser);
+                    answerText = "Dry Run Mode turned " + (newState ? "ON" : "OFF");
                 }
 
                 refreshSettingsMessage((Message) callbackQuery.getMessage(), appUser, messageHelper);
@@ -255,26 +266,80 @@ public class BotCallbackHandler {
                 String historyIdStr = callbackData.substring("set_context:".length());
                 try {
                     long historyId = Long.parseLong(historyIdStr);
-
                     Optional<AnalysisHistory> historyOpt = analysisHistoryRepository.findById(historyId);
 
                     if (historyOpt.isPresent() && historyOpt.get().getAppUser().getId().equals(userId)) {
+                        // 1. Change state
                         botStateService.setUserQueryContextHistoryId(userId, historyId);
-                        botStateService.clearLastGeneratedSql(userId); // Clear conversation history
+                        botStateService.clearLastGeneratedSql(userId);
 
                         AnalysisHistory h = historyOpt.get();
-                        String repoName = h.getRepositoryUrl();
 
-                        messageHelper.sendAnswerCallbackQuery(callbackQueryId, "Switched to: " + repoName, false);
+                        // 2. Answer the callback
+                        messageHelper.sendAnswerCallbackQuery(callbackQueryId, "Selected: " + extractRepoName(h.getRepositoryUrl()), false);
 
-                        messageHelper.sendMessage(chatId, "🔌 **Context Switched!**\n\n" +
-                                "Now working with: `" + messageHelper.escapeMarkdownV2(repoName) + "`\n" +
-                                "Commands `/query` and `/show_schema` will apply to this database.");
+                        // 3. Redraw the menu with the new checkmark
+                        List<AnalysisHistory> allHistory = analysisHistoryRepository.findByAppUserOrderByAnalyzedAtDesc(appUser);
+
+                        // Grouping (as in BotCommandHandler)
+                        Map<String, AnalysisHistory> uniqueRepos = allHistory.stream()
+                                .collect(Collectors.groupingBy(
+                                        AnalysisHistory::getRepositoryUrl,
+                                        Collectors.collectingAndThen(
+                                                Collectors.maxBy(java.util.Comparator.comparing(AnalysisHistory::getAnalyzedAt)),
+                                                Optional::get
+                                        )
+                                ));
+
+                        InlineKeyboardMarkup.InlineKeyboardMarkupBuilder markupBuilder = InlineKeyboardMarkup.builder();
+
+                        // Build the button list again
+                        for (AnalysisHistory repo : uniqueRepos.values()) {
+                            String name = extractRepoName(repo.getRepositoryUrl());
+                            // Check if this repo is selected (now historyId is our choice)
+                            boolean isActive = repo.getId().equals(historyId);
+                            String icon = isActive ? "✅ " : "📁 ";
+
+                            markupBuilder.keyboardRow(List.of(
+                                    InlineKeyboardButton.builder()
+                                            .text(icon + name)
+                                            .callbackData("set_context:" + repo.getId())
+                                            .build()
+                            ));
+                        }
+
+                        // Update text and buttons
+                        String newText = "📂 **Database Selection**\n\n" +
+                                         "✅ Context switched to: `" + messageHelper.escapeMarkdownV2(extractRepoName(h.getRepositoryUrl())) + "`\n" +
+                                         "Commands now apply to this database.";
+
+                        EditMessageText edit = EditMessageText.builder()
+                                .chatId(String.valueOf(chatId))
+                                .messageId(callbackQuery.getMessage().getMessageId())
+                                .text(newText)
+                                .parseMode("Markdown")
+                                .replyMarkup(markupBuilder.build())
+                                .build();
+
+                        messageHelper.editMessage(edit);
+
                     } else {
                         messageHelper.sendAnswerCallbackQuery(callbackQueryId, "Error: Schema not found.", true);
                     }
                 } catch (NumberFormatException e) {
                     log.error("Invalid context ID: {}", historyIdStr);
+                }
+            }
+
+            else if (callbackData.startsWith("sched_alert:")) {
+                // If "Skip" button is pressed
+                if (callbackData.endsWith("skip")) {
+                    ScheduleCreationState state = botStateService.getScheduleCreationState(userId);
+                    if (state != null) {
+                        state.setAlertCondition(null); // No alert
+                        // Proceed to format selection
+                        botInputHandler.askForOutputFormat(chatId, userId, messageHelper);
+                    }
                 }
             }
 
@@ -396,25 +461,37 @@ public class BotCallbackHandler {
         String vizStatus = appUser.isVisualizationEnabled() ? "✅ ON" : "❌ OFF";
         String aiStatus = appUser.isAiInsightsEnabled() ? "✅ ON" : "❌ OFF";
         String modStatus = appUser.isDataModificationEnabled() ? "⚠️ ON" : "🔒 OFF";
+        String sqlStatus = appUser.isShowSqlEnabled() ? "👁️ ON" : "❌ OFF";
+        String dryStatus = appUser.isDryRunEnabled() ? "🚧 ON" : "❌ OFF";
 
         String newText = String.format("""
                 ⚙️ **User Settings**
                 
                 📊 **Visualization:** %s
-                
                 💡 **AI Insights:** %s
-                
                 ✏️ **Data Modification:** %s
-                _(Allow INSERT, UPDATE, DELETE)_
+                
+                👁️ **Show SQL:** %s
+                _(Show generated code in chat)_
+                
+                🚧 **Dry Run Mode:** %s
+                _(Generate SQL ONLY, do not execute)_
                 
                 Tap to toggle:
-                """, vizStatus, aiStatus, modStatus);
+                """, vizStatus, aiStatus, modStatus, sqlStatus, dryStatus);
 
         InlineKeyboardMarkup markup = InlineKeyboardMarkup.builder()
+                // Row 1: Viz + AI
                 .keyboardRow(List.of(
                         InlineKeyboardButton.builder().text("📊 Viz").callbackData("settings:toggle_viz").build(),
                         InlineKeyboardButton.builder().text("💡 AI").callbackData("settings:toggle_ai").build()
                 ))
+                // Row 2: Show SQL + Dry Run
+                .keyboardRow(List.of(
+                        InlineKeyboardButton.builder().text("👁️ Show SQL").callbackData("settings:toggle_show_sql").build(),
+                        InlineKeyboardButton.builder().text("🚧 Dry Run").callbackData("settings:toggle_dry_run").build()
+                ))
+                // Row 3: Data Mod
                 .keyboardRow(List.of(
                         InlineKeyboardButton.builder().text("✏️ Data Mod").callbackData("settings:toggle_mod").build()
                 ))
@@ -501,5 +578,10 @@ public class BotCallbackHandler {
             log.error("Error deleting schedule", e);
             return "Error: Could not delete.";
         }
+    }
+
+    private String extractRepoName(String url) {
+        if (url == null) return "Unknown";
+        return url.replace("https://github.com/", "").replace(".git", "");
     }
 }

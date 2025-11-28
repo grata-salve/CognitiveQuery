@@ -133,7 +133,7 @@ public class TelegramMessageHelper {
 
         if (headers.size() > MAX_COLUMNS_FOR_CHAT_TEXT) {
             sendMessage(chatId, "ℹ️ The result table has too many columns \\(" + headers.size() +
-                    "\\) for chat display\\.\nSwitching to TXT file output\\.");
+                                "\\) for chat display\\.\nSwitching to TXT file output\\.");
             sendSelectResultAsTxtFile(chatId, rows, repoUrlForFilename);
             return;
         }
@@ -217,8 +217,8 @@ public class TelegramMessageHelper {
         }
 
         String messagePrefix = "✅ Query executed successfully\\. Results" +
-                (rows.size() > dataRowDisplayLimit ? " \\(showing first " + dataRowDisplayLimit + " of " + rows.size() + " rows\\):" : ":") +
-                "\n\n";
+                               (rows.size() > dataRowDisplayLimit ? " \\(showing first " + dataRowDisplayLimit + " of " + rows.size() + " rows\\):" : ":") +
+                               "\n\n";
         String fullMessage = messagePrefix + "```\n" + tableContent + "\n```";
 
         int telegramMaxLen = 4096;
@@ -236,7 +236,6 @@ public class TelegramMessageHelper {
         List<Map<String, Object>> chartRows = rows.size() > 30 ? rows.subList(0, 30) : rows;
         Set<String> headers = chartRows.get(0).keySet();
 
-        // Must be exactly 2 columns for a simple chat chart
         if (headers.size() != 2) return;
 
         List<String> headerList = new ArrayList<>(headers);
@@ -246,7 +245,6 @@ public class TelegramMessageHelper {
         String labelCol = null;
         String valueCol = null;
 
-        // Determine which column is numeric (value) and which is the label
         if (isNumeric(chartRows.get(0).get(col1))) {
             valueCol = col1;
             labelCol = col2;
@@ -288,11 +286,19 @@ public class TelegramMessageHelper {
             String backgroundColor;
             boolean fill = false;
 
-            if (looksLikeDate) {
+            if (looksLikeDate && chartRows.size() > 2) {
                 chartType = "line";
                 backgroundColor = "'rgba(75, 192, 192, 0.5)'";
                 fill = true;
-            } else if (chartRows.size() <= 5) {
+            }
+            // If 2 rows or less - always BAR (columns)
+            else if (chartRows.size() <= 2) {
+                chartType = "bar";
+                // Contrasting colors for comparison
+                backgroundColor = "['rgba(54, 162, 235, 0.7)', 'rgba(255, 99, 132, 0.7)']";
+            }
+            // If 3 to 5 rows - Doughnut chart is possible
+            else if (chartRows.size() <= 5) {
                 chartType = "doughnut";
                 backgroundColor = generateJsColorArray(chartRows.size());
             } else {
@@ -308,15 +314,18 @@ public class TelegramMessageHelper {
                     .map(String::valueOf)
                     .collect(Collectors.joining(","));
 
+            // Use Chart.js v2 syntax for quickchart compatibility
             String options = "plugins:{title:{display:true,text:'" + labelCol + " vs " + valueCol + "',font:{size:20}}},";
+
             if (chartType.equals("doughnut")) {
                 options += "legend:{position:'right',labels:{font:{size:14}}},";
             } else {
-                options += "legend:{display:false},scales:{x:{ticks:{autoSkip:true,maxRotation:45,minRotation:45}},y:{beginAtZero:true}},";
+                // Use yAxes/xAxes for scaling and rotation
+                options += "legend:{display:false},scales:{yAxes:[{ticks:{beginAtZero:true}}],xAxes:[{ticks:{autoSkip:true,maxRotation:45}}]},";
             }
 
             String datasetConfig = String.format(
-                    "{label:'%s', data:[%s], backgroundColor:%s, borderColor:'white', borderWidth:2, fill:%b}",
+                    "{label:'%s', data:[%s], backgroundColor:%s, borderColor:'white', borderWidth:1, fill:%b}",
                     valueCol, dataJson, backgroundColor, fill
             );
 
@@ -325,9 +334,8 @@ public class TelegramMessageHelper {
                     chartType, labelsJson, datasetConfig, options
             );
 
-            // Send via QuickChart
             String chartUrl = "https://quickchart.io/chart?c=" + URLEncoder.encode(chartConfig, StandardCharsets.UTF_8)
-                    + "&bkg=white";
+                              + "&bkg=white";
 
             SendPhoto sendPhoto = new SendPhoto();
             sendPhoto.setChatId(String.valueOf(chatId));
